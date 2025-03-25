@@ -1,0 +1,456 @@
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <ctime>
+#include <omp.h>
+
+#include <cv.h>
+#include <highgui.h>
+
+int* load(const char *fName, int &w, int &h, int &level);
+uchar *toImage(const float *fullData, int w, int h, int level);
+float *windowing(int *fullData, int w, int h, int level);
+void shadow(const char *dirName, const uchar *imageData, int w, int h, int level, int min, int max);
+void saveImages(const char *dirName, const uchar *imageData, int w, int h, int level);
+void saveCSVFile(const char *dirName, const char *fName, const int *fullData, const float *fullDataNormalized, const uchar *imageData, const int w, const int h, const int level);
+double diffclock(clock_t clock1,clock_t clock2);
+cv::Mat joinSide(const cv::Mat &im1, const cv::Mat &im2);
+cv::Mat joinDown(const cv::Mat &im1, const cv::Mat &im2);
+cv::Mat drawEdge(const cv::Mat &original, const cv::Mat &edge);
+
+int main(int argc, char **argv)
+{
+  if(argc < 3)
+  {
+    printf("%s%s%s","Use : ", argv[0], " fileData.dat fileData.csv\n");
+    return(EXIT_FAILURE);
+  }
+  else
+  {
+    clock_t beginMain=clock();
+    char path[255];
+    strcpy(path,"/home/leandro/MIRRORSCAN/SOURCE/build");
+    int w,h, level, value;
+    clock_t beginLoading=clock();
+    printf("%s", "LOADING START   : \n");
+    int * fullData = load(argv[1], w, h, level);
+    printf("%s", "LOADING STOP    : \n");
+    clock_t endLoading=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endLoading,beginLoading)), " ms\n");
+    //float *fullDataNormalized = normalize(fullData, w, h, level);
+    clock_t beginWindowing=clock();
+    printf("%s", "WINDOWING START : \n");
+    float *fullDataNormalized = windowing(fullData, w, h, level);
+    printf("%s", "WINDOWING STOP  : \n");
+    clock_t endWindowing=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endWindowing,beginWindowing)), " ms\n");
+    clock_t beginToImage=clock();
+    printf("%s", "TOIMAGE START   : \n");
+    uchar *imageData = toImage(fullDataNormalized, w, h, level);
+    printf("%s", "TOIMAGE STOP    : \n");
+    clock_t endToImage=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endToImage,beginToImage)), " ms\n");
+    clock_t beginSaving=clock();
+    printf("%s", "SAVING START    : \n");
+    saveImages(path, imageData, w, h, level);
+    printf("%s", "SAVING STOP     : \n");
+    clock_t endSaving=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endSaving,beginSaving)), " ms\n");
+    clock_t beginCSV=clock();
+    printf("%s", "CSV START       : \n");
+    //saveCSVFile(path, argv[2], fullData, fullDataNormalized, imageData, w, h, level);
+    printf("%s", "CSV STOP        : \n");
+    clock_t endCSV=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endCSV,beginCSV)), " ms\n");
+    clock_t beginFilter=clock();
+    printf("%s", "FILTER START    : \n");
+    shadow(path, imageData, w, h, level, 35, 100);
+    printf("%s", "FILTER STOP     : \n");
+    clock_t endFilter=clock();
+    printf("%s%f%s","Time elapsed: ", double(diffclock(endFilter,beginFilter)), " ms\n");
+    clock_t endMain=clock();
+    printf("%s%f%s","Total time elapsed: ", double(diffclock(endMain,beginMain)), " ms\n");
+    //delete [] fullData;
+    //delete [] imageData;
+    free(fullData);
+    free(imageData);
+    free(fullDataNormalized);
+    return(EXIT_SUCCESS);
+  }
+}
+
+int* load(const char *fName, int &w, int &h, int &level)
+{
+  int *fullData;
+  int value = 0;
+  FILE *fp;
+  fp = fopen(fName,"r");
+  if(fp != NULL)
+  {
+    fscanf(fp,"%d %d %d\n",&level ,&w, &h);
+    //cv::Mat image = cv::Mat::zeros(h, w, CV_8UC3);
+    //fullData = new int[level*w*h];
+    fullData = (int *) calloc((level*w*h),sizeof(int));
+    printf("%s%d%s%d%s%d%s","WIDTH : ",w," HEIGHT : ",h, " LEVELS : ", level,"\n");
+    for(int z = 0; z < level; z++)
+    {
+      for(int y = 0; y < h; y++)
+      {
+        for(int x = 0; x < w; x++)
+        {
+          int index = ((z*w*h) + ((y * w) + x));
+          //int index = ((y * h) + x);
+          fscanf(fp,"%d ",&value);
+          fullData[index] = value;
+        }
+      }
+    }
+    fclose(fp);
+    return(fullData);
+  }
+  else
+  {
+    printf("%s%s%s","Cannot open file ",fName,".\n");
+    exit(0);
+  }
+}
+
+uchar *toImage(const float *fullData, int w, int h, int level)
+{
+  //uchar *imageData = new uchar[w*h*level];
+  uchar *imageData = (uchar *) calloc((level*w*h),sizeof(uchar));
+  #pragma omp parallel for
+  for(int z = 0; z < level; z++)
+  {
+    for(int y = 0; y < h; y++)
+    {
+      for(int x = 0; x < w; x++)
+      {
+        int index = ((z*w*h) + ((y * w) + x));
+        //imageData[index] = (uchar)(fullData[index] * 255);
+        imageData[index] = (uchar)(fullData[index]);
+      }
+    }
+  }
+  return(imageData);
+}
+
+float *windowing(int *fullData, int w, int h, int level)
+{
+  int value = 0;
+  float *fullDataNormalized = (float *) calloc((level*w*h),sizeof(float));
+  int index = 0;
+  int valor = 0;
+  int cor = 0;
+  int base = -500;
+  int w1 = 400;//window center
+  double prop = 0;
+  int z = 0;
+  int y = 0;
+  int x = 0;
+  //#pragma omp parallel for default(none) private(index,valor,cor,prop,z,y,x) shared(base,w1,fullDataNormalized,fullData,level,h,w)
+  //{
+   //start omp
+    #pragma omp parallel for
+    for(z = 0; z < level; z++)
+    {
+      for(y = 0; y < h; y++)
+      {
+        for(x = 0; x < w; x++)
+        {
+          index = ((z*w*h) + ((y * w) + x));
+          valor = fullData[index];
+          cor = 0;
+          base = -500;
+          w1 = 400;//window center
+          prop = 0;
+          if (valor < base - w1) 
+          {
+            cor = 0;
+          } 
+          else 
+          {
+            if (valor > base + w1)
+            {
+              cor = 255;
+            }
+            else
+            {
+              prop = 255.0 / (w1 * 2.0);
+              cor = (int) ((valor - (base - w1)) * prop);
+            }
+          }
+          fullDataNormalized[index] = (float)cor;
+        }
+      }
+    }
+  //}//end OMP
+  //#pragma omp parallel for
+  //for(int n=0; n<10; ++n)
+  //{
+  //  printf(" %d", n);
+  //}
+  return(fullDataNormalized);
+}
+
+void saveImages(const char *dirName, const uchar *imageData, int w, int h, int level)
+{
+  for(int z = 0; z < level; z++)
+  {
+    cv::Mat image = cv::Mat::zeros(h, w, CV_8U);
+    char fName[255];
+    sprintf(fName,"%s/pulmao-%d.png",dirName,z);
+    for(int y = 0; y < h; y++)
+    {
+      for(int x = 0; x < w; x++)
+      {
+        int index = ((z*w*h) + ((y * w) + x));
+        //printf("%s%d%s","I= ",imageData[index]," ");
+        image.at<uchar>(y,x) = imageData[index];
+      }
+    }
+    imwrite(fName,image);
+  }
+}
+
+void saveCSVFile(const char *dirName, const char *fName, const int *fullData, const float *fullDataNormalized, const uchar *imageData, const int w, const int h, const int level)
+{
+  FILE *fp;
+  char path[255];
+  sprintf(path,"%s/%s",dirName,fName);
+  fp = fopen(path,"w");
+  if(fp != NULL)
+  {
+    int intValue = 0;
+    uchar ucharValue = 0;
+    float floatValue = 0;
+    fprintf(fp,"%s","\"X\",\"Y\",\"Z\",\"INTEGER HU VALUE\", \"FLOAT NORMALIZED VALUE\", \n");
+    #pragma omp parallel for
+    for(int z = 0; z < level; z++)
+    {
+      for(int y = 0; y < h; y++)
+      {
+        for(int x = 0; x < w; x++)
+        {
+          int index = ((z*w*h) + ((y * w) + x));
+          intValue = fullData[index];
+          floatValue = fullDataNormalized[index];
+          ucharValue = imageData[index];
+          fprintf(fp,"%d%s%d%s%d%s%d%s%f%s",x,",",y,",",z,",",intValue,",",floatValue,",\n"); 
+        }
+      }
+    }
+    fclose(fp);
+  }
+  else
+  {
+    printf("%s%s%s","Cannot open ", fName, " to write!");
+  }
+}
+
+void shadow(const char *dirName, const uchar *imageData, int w, int h, int level, int min, int max)
+{
+  for(int z = 0; z < level; z++)
+  {
+    cv::Mat imageOriginal = cv::Mat::zeros(h, w, CV_8UC3);
+    cv::Mat imageFiltered = cv::Mat::zeros(h, w, CV_8UC3);
+    char fName[255];
+    sprintf(fName,"%s/shadow-%d.png", dirName,z);
+    char fName2[255];
+    sprintf(fName2,"%s/shadow-plus-original-%d.png", dirName,z);
+    char fName3[255];
+    sprintf(fName3,"%s/shadow-in-original-%d.png", dirName,z);
+    char fName4[255];
+    sprintf(fName4,"%s/shadow-in-filtered-%d.png", dirName,z);
+    char fName5[255];
+    sprintf(fName5,"%s/shadow-in-original-shadow-in-filtered-%d.png", dirName,z);
+    //#pragma omp parallel for
+    for(int y = 0; y < h; y++)
+    {
+      for(int x = 0; x < w; x++)
+      {
+        int index = ((z*w*h) + ((y * w) + x));
+        if((imageData[index] > min) && (imageData[index] < max))
+        {
+          imageFiltered.at<cv::Vec3b>(y,x)[2] = imageData[index];
+          imageFiltered.at<cv::Vec3b>(y,x)[1] = imageData[index];
+          imageFiltered.at<cv::Vec3b>(y,x)[0] = imageData[index];
+        }
+        else
+        {
+          imageFiltered.at<cv::Vec3b>(y,x)[2] = 0;
+          imageFiltered.at<cv::Vec3b>(y,x)[1] = 0;
+          imageFiltered.at<cv::Vec3b>(y,x)[0] = 0;
+        }
+        imageOriginal.at<cv::Vec3b>(y,x)[2] = imageData[index];
+        imageOriginal.at<cv::Vec3b>(y,x)[1] = imageData[index];
+        imageOriginal.at<cv::Vec3b>(y,x)[0] = imageData[index];
+      }
+    }
+    imwrite(fName,imageFiltered);
+    cv::Mat can = cv::Mat(imageFiltered.rows, imageFiltered.cols, imageFiltered.channels());
+
+    cv::Mat src_gray, grad;
+
+    int scale = 1;
+    int delta = 0;
+    int ddepth = CV_16S;
+
+    /// Convert it to gray
+    cv::cvtColor(imageFiltered, src_gray, CV_RGB2GRAY );
+    /// Generate grad_x and grad_y
+    cv::Mat grad_x, grad_y;
+    cv::Mat abs_grad_x, abs_grad_y;
+
+    /// Gradient X
+    //Scharr( src_gray, grad_x, ddepth, 1, 0, scale, delta, BORDER_DEFAULT );
+    cv::Sobel( src_gray, grad_x, ddepth, 1, 0, 3, scale, delta, cv::BORDER_DEFAULT );
+    cv::convertScaleAbs( grad_x, abs_grad_x );
+
+    /// Gradient Y
+    //Scharr( src_gray, grad_y, ddepth, 0, 1, scale, delta, BORDER_DEFAULT );
+    cv::Sobel( src_gray, grad_y, ddepth, 0, 1, 3, scale, delta, cv::BORDER_DEFAULT );
+    cv::convertScaleAbs( grad_y, abs_grad_y );
+
+    /// Total Gradient (approximate)
+    cv::addWeighted( abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad );
+
+    int aperature_size = 3;
+    double lowThresh = 20;
+    double highThresh = 40;
+    int xorder = 1;
+    int yorder = 1;
+    int ksize=3;
+    //double scale=1;
+    //double delta=0;
+    int borderType=cv::BORDER_DEFAULT;
+
+    ///CANNY
+    //cv::Canny(imageFiltered, can, lowThresh, highThresh, aperature_size);
+    cv::Canny(imageFiltered, can, lowThresh*aperature_size, highThresh*aperature_size, aperature_size);
+
+    cv::Mat sob = cv::Mat(imageFiltered.rows, imageFiltered.cols, imageFiltered.channels());
+
+    for(int y = 0; y < imageFiltered.rows; y++)
+    {
+      for(int x = 0; x < imageFiltered.cols; x++)
+      {
+        if(grad.at<uchar>(y,x) > 0)
+          std::cout << " " << grad.at<uchar>(y,x) << std::endl;
+        //sob.at<cv::Vec3b>(y,x)[2] =(uchar) grad.at<float>(y,x);
+        //sob.at<cv::Vec3b>(y,x)[1] =(uchar) grad.at<float>(y,x);
+        //sob.at<cv::Vec3b>(y,x)[0] =(uchar) grad.at<float>(y,x);
+      }
+    }
+
+    cv::Mat sinf = drawEdge(imageFiltered, can);
+    cv::Mat sino = drawEdge(imageOriginal, can);
+
+    cv::Mat big = joinSide(imageOriginal,imageFiltered);
+    cv::Mat bigShadowINs = joinSide(sino,sinf);
+    cv::Mat bigAll = joinDown(big,bigShadowINs);
+
+    imshow("Sobel",sob);
+    imshow("Canny",can);
+    imshow("All", bigAll);
+
+    imwrite(fName3,sino);
+    imwrite(fName4,sinf);
+    imwrite(fName5,bigShadowINs);
+    imwrite(fName2,big);
+
+    cv::waitKey(1);
+  }
+}
+
+double diffclock(clock_t clock1,clock_t clock2)
+{
+  double diffticks=clock1-clock2;
+  double diffms=(diffticks*1000)/CLOCKS_PER_SEC;
+  return diffms;
+}
+
+cv::Mat joinSide(const cv::Mat &im1, const cv::Mat &im2)
+{
+  if((im1.rows == im2.rows) && (im1.cols == im2.cols) && (im1.channels() == im2.channels()) && (im1.channels() == 3))
+  {
+    cv::Mat big = cv::Mat(im1.rows, (im1.cols + im2.cols), im1.type());
+    for(int y = 0; y < im1.rows; y++)
+    {
+      for(int x = 0; x < (im1.cols + im2.cols); x++)
+      {
+        if(x < im1.cols)
+        {
+          big.at<cv::Vec3b>(y,x) = im1.at<cv::Vec3b>(y,x);
+        }
+        if(x >= im1.cols)
+        {
+          big.at<cv::Vec3b>(y,x) = im2.at<cv::Vec3b>(y,x-im1.cols);
+        }
+      }
+    }
+    return(big);
+  }
+  return(cv::Mat());
+}
+
+cv::Mat drawEdge(const cv::Mat &original, const cv::Mat &edge)
+{
+  #if defined(DEBUG)
+    printf("Original rows : %d\n",original.rows);
+    printf("Original cols : %d\n",original.cols);
+    printf("Original chns : %d\n",original.channels());
+    printf("Original type : %d\n",original.type());
+    printf("Edge     rows : %d\n",edge.rows);
+    printf("Edge     cols : %d\n",edge.cols);
+    printf("Edge     chns : %d\n",edge.channels());
+    printf("Edge     type : %d\n",edge.type());
+  #endif
+  if((original.rows == edge.rows) && (original.cols == edge.cols) && (original.channels() == 3))
+  {
+    cv::Mat drawed = cv::Mat(original.rows, original.cols, original.type());
+    for(int y = 0; y < original.rows; y++)
+    {
+      for(int x = 0; x < original.cols; x++)
+      {
+        if(edge.at<uchar>(y,x) > 0)
+        {
+          drawed.at<cv::Vec3b>(y,x)[2] = 255;
+          drawed.at<cv::Vec3b>(y,x)[1] = 0;
+          drawed.at<cv::Vec3b>(y,x)[0] = 0;
+        }
+        else
+        {
+          drawed.at<cv::Vec3b>(y,x) = original.at<cv::Vec3b>(y,x);
+        }
+      }
+    }
+    return(drawed);
+  }
+  //printf("Erro ");
+  return(original);
+}
+
+cv::Mat joinDown(const cv::Mat &im1, const cv::Mat &im2)
+{
+  if((im1.rows == im2.rows) && (im1.cols == im2.cols) && (im1.channels() == im2.channels()) && (im1.channels() == 3))
+  {
+    cv::Mat big = cv::Mat((im1.rows + im2.rows), im1.cols, im1.type());
+    for(int y = 0; y < (im1.rows + im2.rows); y++)
+    {
+      for(int x = 0; x < im1.cols; x++)
+      {
+        if(y < im1.rows)
+        {
+          big.at<cv::Vec3b>(y,x) = im1.at<cv::Vec3b>(y,x);
+        }
+        if(y >= im1.rows)
+        {
+          big.at<cv::Vec3b>(y,x) = im2.at<cv::Vec3b>(y-im1.rows,x);
+        }
+      }
+    }
+    return(big);
+  }
+  return(cv::Mat());
+}
