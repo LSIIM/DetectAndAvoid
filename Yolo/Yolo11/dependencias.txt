@@ -1,0 +1,10 @@
+python -m venv venv
+
+source ./venv/bin/activate
+
+
+pip install ultralytics -q
+
+
+!pip uninstall -y opencv-python opencv-contrib-python -q
+!pip install opencv-contrib-python==4.5.5.64 -q
