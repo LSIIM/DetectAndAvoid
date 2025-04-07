@@ -9,7 +9,7 @@ import time
 
 
 video_path = "Raw_Videos/fev_corte_3.mp4"  # Ajuste para o caminho do seu vídeo
-model = YOLO("best.pt")  # Ajuste para o caminho do seu modelo
+model = YOLO("Weights\best_fev_2025.pt")  # Ajuste para o caminho do seu modelo
 PROCESS_SCALE = 0.9  # Fator de redução de resolução para detecção
 MAX_TRAJECTORY_LENGTH = 90  # Número máximo de pontos na trajetória
 

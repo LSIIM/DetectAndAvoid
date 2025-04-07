@@ -5,7 +5,7 @@ from ultralytics import YOLO
 
 # Caminho do vídeo e do modelo (ajuste conforme necessário)
 video_path = "Raw_Videos/fev_corte_3.mp4"
-model = YOLO("best.pt")
+model = YOLO("Weights\best_fev_2025.pt")
 
 # Parâmetros iniciais
 MAX_TRAJECTORY_LENGTH = 90
