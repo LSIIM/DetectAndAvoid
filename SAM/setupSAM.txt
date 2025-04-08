@@ -1,0 +1,35 @@
+Setup - SAM
+
+Create Venv:
+
+- https://askubuntu.com/questions/1465218/pip-error-on-ubuntu-externally-managed-environment-×-this-environment-is-extern
+
+Install libs:
+
+- pip install transformers==4.49.0
+- pip install -q supervision jupyter_bbox_widget
+- pip install numpy
+- pip install opencv-python
+- pip install torch
+- pip install ipython
+- pip install pillow
+
+Cuda Ubuntu:
+
+- https://www.cherryservers.com/blog/install-cuda-ubuntu
+
+Git clone:
+
+- git clone https://github.com/zdata-inc/sam2_realtime
+
+- cd sam2_realtime
+pip install -e .
+pip install -e ".[notebooks]"
+
+- cd checkpoints
+./download_ckpts.sh
+cd ..
+
+- create a folder in /sam2_realtime and add video
+
+- insert main.py in folder /sam2_realtime
