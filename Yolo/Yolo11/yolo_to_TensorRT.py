@@ -5,7 +5,8 @@ model = YOLO(r'Weights\best_fev_2025.pt')
 model.export(
     format='engine',
     device=0,
-    half=True,
+    #half=True,
+    int8=True,
     imgsz=640,
     workspace=4
 )
