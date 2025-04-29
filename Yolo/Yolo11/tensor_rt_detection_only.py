@@ -7,7 +7,7 @@ video_path = r"Raw_Videos/fev_corte_2.mp4"
 model_path = r"best_fev_2025.engine" 
 output_path = r"detection_tensorrt_output.mp4" 
 
-CONFIDENCE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.3
 
 print(f"Carregando modelo TensorRT de: {model_path}")
 try:
