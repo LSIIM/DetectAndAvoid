@@ -5,10 +5,13 @@ model = YOLO(r'Weights\best_fev_2025.pt')
 model.export(
     format='engine',
     device=0,
+    
     #half=True,
     int8=True,
+    batch=16,
     imgsz=640,
-    workspace=4
+    
+    #workspace=4
 )
 
 print("Exportação para TensorRT (.engine) concluída!")
