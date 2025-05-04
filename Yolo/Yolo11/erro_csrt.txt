@@ -1,5 +1,0 @@
-se tiver o erro: AttributeError: module 'cv2' has no attribute 'TrackerCSRT_create'
-teste:
-
-pip uninstall opencv-contrib-python
-pip install opencv-contrib-python
