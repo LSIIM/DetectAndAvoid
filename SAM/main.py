@@ -11,6 +11,7 @@ import math
 import argparse
 
 from sam2.build_sam import build_sam2_object_tracker
+
 import supervision as sv
 
 def resize_mask(mask, video_height, video_width):
@@ -22,6 +23,10 @@ def resize_mask(mask, video_height, video_width):
                                             )
     return mask
 
+def tratar_first_frame():
+
+
+    return
 
 parser = argparse.ArgumentParser(description="Processador de vídeo ou câmera")
 parser.add_argument("video", nargs='?', default=None, help="Caminho para o vídeo ou use a câmera se não especificado")
@@ -106,10 +111,30 @@ with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16):
         mask =  resize_mask(sam_out['pred_masks'], video_height, video_width)
         mask = (mask > 0.0).numpy()
 
+        mask_center = mask[0, 0]  # Pega a primeira máscara do batch e primeiro canal
+        bg_mask = ~mask_center
+            
         for i in range(mask.shape[0]):
             obj_mask = mask[i, 0, :, :]
-            frame_copy[obj_mask] = [255, 105, 180]
 
+            frame_copy[:, :] = [144, 238, 144]
+
+            frame_copy[obj_mask] = [255, 105, 180]
+        
+        y_indices, x_indices = np.where(mask_center)
+        
+        if len(y_indices) > 0:
+            center_y = int(round(np.mean(y_indices)))
+            center_x = int(round(np.mean(x_indices)))
+            cv2.putText(frame_copy, "Sky Area: Navigable Zone", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        y_bg, x_bg = np.where(bg_mask)
+
+        if len(y_bg):
+            center_y_bg = int(round(np.mean(y_bg)))
+            center_x_bg = int(round(np.mean(x_bg)))
+            cv2.putText(frame_copy, "Danger Area: No-Navigation Zone", (center_x_bg, center_y_bg), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+            
         rgb_frame = Image.fromarray(frame_copy)
         
         clear_output(wait=True)
