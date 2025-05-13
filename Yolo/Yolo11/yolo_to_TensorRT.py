@@ -10,7 +10,7 @@ model.export(
     #int8=True,
     batch=4,
     imgsz=640,
-    
+    dynamic=True
     #workspace=4
 )
 
