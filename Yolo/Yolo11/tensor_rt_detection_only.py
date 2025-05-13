@@ -4,8 +4,8 @@ import time
 from ultralytics import YOLO
 
 video_path = r"Raw_Videos/fev_corte_2.mp4"
-model_path = r"best_fev_2025.engine" 
-output_path = r"detection_tensorrt_output.mp4" 
+model_path = r"Weights\best_yolo11_small_abril.engine" 
+output_path = r"detection_tensorrt_output-SMALL.mp4" 
 
 CONFIDENCE_THRESHOLD = 0.3
 
@@ -48,7 +48,7 @@ while True:
     frame_count += 1
     start_time = time.time()
 
-    results = model(frame, verbose=False) 
+    results = model(frame, verbose=False,conf=CONFIDENCE_THRESHOLD) 
     
     if results and results[0].boxes:
         boxes = results[0].boxes.xyxy.cpu().numpy()

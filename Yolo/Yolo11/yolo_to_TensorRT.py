@@ -1,14 +1,14 @@
 from ultralytics import YOLO
 
-model = YOLO(r'Weights\best_fev_2025.pt')
+model = YOLO(r'Weights\best_yolo11_small_abril.pt')
 
 model.export(
     format='engine',
     device=0,
     
-    #half=True,
-    int8=True,
-    batch=16,
+    half=True,
+    #int8=True,
+    batch=4,
     imgsz=640,
     
     #workspace=4
