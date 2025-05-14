@@ -23,10 +23,78 @@ def resize_mask(mask, video_height, video_width):
                                             )
     return mask
 
-def tratar_first_frame():
+def tratar_first_frame(frame):
 
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
 
-    return
+    #edges = cv2.Canny(blurred, 0, 100)
+    edges = cv2.Canny(blurred, 100, 135)
+
+    # detect lines
+    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=100, minLineLength=100, maxLineGap=50)
+
+    best_line = 0
+    max_length = 0
+    
+    if lines.size != 0:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            # calc comp
+            length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)  
+
+            #calc ang
+            angle = np.arctan2(abs(y2 - y1), abs(x2 - x1)) * (180 / np.pi)  # 
+
+            #line w low ang and max comp
+            if angle < 5 and length > max_length:
+                best_line = (x1, y1, x2, y2)
+                max_length = length
+    
+    mask = np.zeros_like(frame, dtype=np.uint8)
+
+    if best_line:
+        x1, y1, x2, y2 = best_line
+
+        # Criar um polígono abaixo da linha do horizonte (área a ser preenchida com preto)
+        height, width = frame.shape[:2]
+        poly_points = np.array([[(0, y1), (width, y2), (width, height), (0, height)]], dtype=np.int32)
+
+        # Preencher com preto a região abaixo da linha do horizonte
+        cv2.fillPoly(frame, poly_points, (0, 0, 0))
+                
+    hsv       = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    upper_hue = np.array([120,255,255])
+    lower_hue = np.array([90,0,150]) 
+
+    mask      = cv2.inRange(hsv, lower_hue, upper_hue)
+
+    blur = cv2.GaussianBlur(mask, (9, 9), 0)
+
+    _, img_thresholded = cv2.threshold(blur, 0, 255, cv2.THRESH_OTSU)
+
+    mask = cv2.morphologyEx(img_thresholded, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), 5)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    selected_contours = []
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area > 5000:  # Ajuste este valor para detectar áreas brancas grandes
+            selected_contours.append(contour)
+            black_image = np.zeros(mask.shape, np.uint8)
+            cv2.fillPoly(black_image, pts=selected_contours, color= (255,255,255))
+    
+    coord_white = np.column_stack(np.where(black_image == 255))
+
+    if(len(coord_white) > 0):
+
+        y_min, x_min = coord_white.min(axis=0)
+        y_max, x_max = coord_white.max(axis=0)
+        return np.array([[x_min, y_min], [x_max, y_max]])
+
+    return None
 
 parser = argparse.ArgumentParser(description="Processador de vídeo ou câmera")
 parser.add_argument("video", nargs='?', default=None, help="Caminho para o vídeo ou use a câmera se não especificado")
@@ -86,9 +154,8 @@ with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16):
 
         # Simulate detection on first frame
         if first_frame:
-            bbox = np.array([[[0, 0], [1300, 350]]
-                            ]
-                            )
+            
+            bbox = tratar_first_frame(frame.copy())
 
             sam_out = sam.track_new_object(img=img,
                                           box=bbox
