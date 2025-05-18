@@ -1,82 +1,91 @@
 import cv2
-import numpy as np
 import time
 from ultralytics import YOLO
 
-# Caminho do vídeo e do modelo (ajuste conforme necessário)
-video_path = "Raw_Videos/fev_corte_3.mp4"
-model = YOLO("Weights\best_fev_2025.pt")
+VIDEO_PATH = r"Raw_Videos\fev_corte_3.mp4"
+MODEL_PATH = r"Weights\best_fev_2025.pt"
+OUTPUT_PATH = r"detection_optimized.mp4"
+CONFIDENCE_THRESHOLD = 0.6
 
-# Parâmetros iniciais
-MAX_TRAJECTORY_LENGTH = 90
 
-cap = cv2.VideoCapture(video_path)
-if not cap.isOpened():
-    print("Erro ao abrir o vídeo.")
+try:
+    model = YOLO(MODEL_PATH)
+    print("Modelo carregado com sucesso.")
+except Exception as e:
+    print(f"Erro ao carregar o modelo: {e}")
     exit()
 
-tracker = None
-trajectory = []
-frame_count = 0
+cap = cv2.VideoCapture(VIDEO_PATH)
+if not cap.isOpened():
+    print(f"Erro ao abrir o vídeo: {VIDEO_PATH}")
+    exit()
+
+video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+video_fps = cap.get(cv2.CAP_PROP_FPS)
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out_video = cv2.VideoWriter(OUTPUT_PATH, fourcc, video_fps, (video_width, video_height))
+
+
+
+if not out_video.isOpened():
+    print(f"Erro ao criar o arquivo de vídeo de saída: {OUTPUT_PATH}")
+    cap.release()
+    exit()
+
+frame_counter = 0
+total_processing_fps = 0
+print("Iniciando processamento do vídeo...")
 
 while True:
     ret, frame = cap.read()
     if not ret:
+        print("Fim do vídeo ou erro na leitura do frame.")
         break
 
-    frame_count += 1
+    frame_counter += 1
     start_time = time.time()
-
-    # A cada 30 frames ou se não houver tracker ativo, utiliza YOLO para detecção
-    if tracker is None or frame_count % 30 == 0:
-        results = model(frame)
-        if len(results) > 0:
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            if boxes.shape[0] > 0:
-                # Seleciona a primeira detecção
-                x1, y1, x2, y2 = boxes[0][:4]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                initBB = (x1, y1, x2 - x1, y2 - y1)
-                tracker = cv2.TrackerCSRT_create()
-                tracker.init(frame, initBB)
-
-                # Desenha o bounding box e atualiza a trajetória
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
-                trajectory.append((center_x, center_y))
-                trajectory = trajectory[-MAX_TRAJECTORY_LENGTH:]
-                cv2.circle(frame, (center_x, center_y), 4, (0, 0, 255), -1)
-    else:
-        # Atualiza o tracker com o frame atual
-        success, box = tracker.update(frame)
-        if success:
-            (x, y, w, h) = [int(v) for v in box]
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            center_x = x + w // 2
-            center_y = y + h // 2
-            trajectory.append((center_x, center_y))
-            trajectory = trajectory[-MAX_TRAJECTORY_LENGTH:]
-            cv2.circle(frame, (center_x, center_y), 4, (0, 0, 255), -1)
-        else:
-            tracker = None
-
-    # Desenha a trajetória (linhas conectando os pontos)
-    for i in range(1, len(trajectory)):
-        cv2.line(frame, trajectory[i - 1], trajectory[i], (255, 0, 0), 2)
-
-    # Calcula e exibe os FPS do frame atual
-    elapsed_time = time.time() - start_time
-    fps_val = 1.0 / elapsed_time if elapsed_time > 0 else 0
-    cv2.putText(frame, f"FPS: {fps_val:.1f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-
-    # Exibe o frame com a detecção e rastreamento
-    cv2.imshow("Tracking", frame)
     
-    # Encerra se a tecla 'q' for pressionada
+                        #imgsz=INFERENCE_IMG_SIZE,
+    results = model(frame,  verbose=False, conf=CONFIDENCE_THRESHOLD)
+    
+    if results and results[0].boxes:
+        for detection_data in results[0].boxes.data.cpu().numpy():
+            
+            x1, y1, x2, y2, conf, _ = detection_data
+            
+            x1_int, y1_int, x2_int, y2_int = map(int, [x1, y1, x2, y2])
+            
+            cv2.rectangle(frame, (x1_int, y1_int), (x2_int, y2_int), (0, 0, 255), 2)
+            
+            conf_text = f"{conf:.2f}"
+            text_y_pos = y1_int - 10 if y1_int > 10 else y1_int + 15
+            cv2.putText(frame, conf_text, (x1_int, text_y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            
+            
+            
+
+    current_loop_time = time.time() - start_time
+    current_fps = 1.0 / current_loop_time if current_loop_time > 0 else 0
+    total_processing_fps += current_fps
+    
+    cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    out_video.write(frame)
+    cv2.imshow("Detection", frame)
+    
     if cv2.waitKey(1) & 0xFF == ord('q'):
+        print("Processamento interrompido pelo usuário.")
         break
 
+avg_fps = total_processing_fps / frame_counter if frame_counter > 0 else 0
+
+print("Finalizando...")
 cap.release()
+out_video.release()
 cv2.destroyAllWindows()
+
+print(f"Processamento concluído.")
+print(f"Vídeo de detecção salvo em: {OUTPUT_PATH}")
+print(f"Total de frames processados: {frame_counter}")
+print(f"FPS médio de processamento: {avg_fps:.2f}")
