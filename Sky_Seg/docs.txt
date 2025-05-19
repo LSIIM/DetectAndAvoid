@@ -1,0 +1,14 @@
+source =
+
+https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing/tree/1f7811b32b64ddc957269defff84bc87a3f0b74f
+
+https://huggingface.co/JianyuanWang/skyseg/blob/main/skyseg.onnx
+
+https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing/blob/1f7811b32b64ddc957269defff84bc87a3f0b74f/onnx_interence.py#L4
+
+baixar modelo completo em: https://huggingface.co/JianyuanWang/skyseg/blob/main/skyseg.onnx
+
+github nao permitiu subir o modelo f32 devido ao peso dele.
+
+!pip uninstall -y onnxruntime onnxruntime-gpu
+!pip install onnxruntime-gpu
