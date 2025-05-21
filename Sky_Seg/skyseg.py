@@ -4,6 +4,7 @@ import time
 import cv2 as cv
 import numpy as np
 import onnxruntime
+import argparse
 
 def run_inference(onnx_session, model_input_target_size_hw, image_bgr):
     original_height, original_width = image_bgr.shape[:2]
@@ -47,18 +48,12 @@ def run_inference(onnx_session, model_input_target_size_hw, image_bgr):
     )
     return mask_resized_to_image_input_dims
 
-
-
-
-
-
 # resulta video normal vs video segmentado lado a lado
 
-def main():
+def main(video_path):
+    
     model_path = f"skyseg_fp16.onnx"  # "skyseg.onnx"
-    video_input_path = f"vid_dr03.mp4"
-
-
+    video_input_path = video_path
 
     input_dir, filename = os.path.split(video_input_path)
     name, ext = os.path.splitext(filename)
@@ -69,9 +64,6 @@ def main():
 
     if not os.path.exists(model_path):
         print(f"Error: ONNX model file not found at '{model_path}'.")
-        return
-    if not os.path.exists(video_input_path):
-        print(f"Error: Input video not found at '{video_input_path}'.")
         return
 
     try:
@@ -105,18 +97,18 @@ def main():
             print(f"Error loading ONNX model with CPU-only: {e_cpu}")
             return
 
-    cap = cv.VideoCapture(video_input_path)
+    if args.video is None:
+        print("Usando a câmera (cv2.VideoCapture(0))")
+        cap = cv.VideoCapture(0)
+    else:
+        print(f"Usando o vídeo: {args.video}")
+        cap = cv.VideoCapture(video_input_path)
+
     if not cap.isOpened():
         print(f"Error: Could not open video file {video_input_path}")
         return
 
     fps = cap.get(cv.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
-
-    if total_frames == 0:
-        print("Error: Video has no frames or metadata is not accessible.")
-        cap.release()
-        return
 
     ret, first_frame = cap.read()
     if not ret:
@@ -220,8 +212,7 @@ def main():
     end_process_time = time.time()
     elapsed_time = end_process_time - start_process_time
     avg_fps_val = frame_count / elapsed_time if elapsed_time > 0 else float('inf')
-    eta_seconds_val = ((elapsed_time / frame_count) * (total_frames - frame_count)) if frame_count > 0 and frame_count < total_frames else 0
-    print(f"Avg FPS: {avg_fps_val:.2f}. ETA: {eta_seconds_val:.2f}s")
+    print(f"Avg FPS: {avg_fps_val:.2f}.")
 
     if frame_count > 0:
       print(f"Finished processing {frame_count} frames. Total time: {end_process_time - start_process_time:.2f}s")
@@ -235,4 +226,9 @@ def main():
     cv.destroyAllWindows()
 
 if __name__ == '__main__':
-    main()
+
+    parser = argparse.ArgumentParser(description="Processador de vídeo ou câmera")
+    parser.add_argument("video", nargs='?', default=None, help="Caminho para o vídeo ou use a câmera se não especificado")
+    args = parser.parse_args()
+
+    main(video_path=f"{args.video}")
