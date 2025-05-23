@@ -8,8 +8,9 @@ from collections import deque
 
 #VIDEO_PATH = r"Raw_Videos\fev_corte_2.mp4"
 VIDEO_PATH = r"Raw_Videos/fev_corte_2.mp4"
-OUTPUT_PATH = r"alert_system_yolo_MEDIUM.mp4"
-MODEL_PATH = r"Weights/best_fev_2025.pt"
+OUTPUT_PATH = r"alert_system_yolo_MEDIUM_TENSOR_RT.mp4"
+#MODEL_PATH = r"Weights/best_fev_2025.pt"
+MODEL_PATH = r"Weights/best_fev_2025.engine"
 
 
 TRAIL_LENGTH = 50
