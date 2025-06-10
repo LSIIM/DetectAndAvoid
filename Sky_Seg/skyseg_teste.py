@@ -62,6 +62,14 @@ def main(video_path):
     model_inference_input_size_hw = (320, 320)
     binary_threshold_value = 128
 
+    # Configure assim suas opções de sessão
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = 4  # Para Jetson com 6-8 núcleos
+    options.inter_op_num_threads = 2
+    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    options.add_session_config_entry("session.set_deny_as_affinity", "1")  # Desativa affinity
+    options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+
     if not os.path.exists(model_path):
         print(f"Error: ONNX model file not found at '{model_path}'.")
         return
