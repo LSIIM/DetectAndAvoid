@@ -62,24 +62,32 @@ def main(video_path):
     model_inference_input_size_hw = (320, 320)
     binary_threshold_value = 128
 
-    # Configure assim suas opções de sessão
     options = onnxruntime.SessionOptions()
-    options.intra_op_num_threads = 4  # Para Jetson com 6-8 núcleos
+    
+    # 1. Definir número explícito de threads (evita o erro de affinity)
+    options.intra_op_num_threads = 4  # Para CPUs ARM de 6-8 núcleos
     options.inter_op_num_threads = 2
-    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
-    options.add_session_config_entry("session.set_deny_as_affinity", "1")  # Desativa affinity
+    
+    options.enable_cpu_mem_arena = False
+    
+    # 2. Desativar tentativa de setar affinity
+    options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL  # Alternativa: ORT_PARALLEL
+    
+    # 3. Configurações de performance específicas
     options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+    options.enable_cpu_mem_arena = True  # Melhor para ARM
 
     if not os.path.exists(model_path):
         print(f"Error: ONNX model file not found at '{model_path}'.")
         return
-
+	
     try:
         available_providers = onnxruntime.get_available_providers()
         preferred_providers_config = []
 
-        """
+        
         if 'TensorrtExecutionProvider' in available_providers:
+            print("Iniciando TensorRT, isso pode levar vários minutos na primeira execução...")
             preferred_providers_config.append(
                 ('TensorrtExecutionProvider', {
                     'trt_max_workspace_size': 1 << 30,  # 1GB
@@ -89,7 +97,8 @@ def main(video_path):
                     'trt_dla_enable': False,  
                 })
             )
-        """
+            
+        
         if 'CUDAExecutionProvider' in available_providers:
             preferred_providers_config.append(
                 ('CUDAExecutionProvider', {
@@ -102,7 +111,7 @@ def main(video_path):
             )
         preferred_providers_config.append('CPUExecutionProvider')
 
-        onnx_session = onnxruntime.InferenceSession(model_path, providers=preferred_providers_config)
+        onnx_session = onnxruntime.InferenceSession(model_path, providers=preferred_providers_config, sess_options=options)
 
         print(f"ONNX session using providers: {onnx_session.get_providers()}")
         if 'CUDAExecutionProvider' not in onnx_session.get_providers():
