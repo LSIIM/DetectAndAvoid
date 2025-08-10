@@ -49,9 +49,9 @@ def process_frame_for_horizon(frame, onnx_session, model_input_size_hw):
     return mask_bgr
 
 def main():
-    YOLO_MODEL_PATH = r"Weights\best_fev_2025.pt"
+    YOLO_MODEL_PATH = r"best_fev_2025.engine"
     HORIZON_MODEL_PATH = "skyseg_fp16.onnx"
-    VIDEO_PATH = r"videos_test\droneVSdrone1.mp4"
+    VIDEO_PATH = r"videos_test/fev_corte_2.mp4"
     
     input_dir, filename = os.path.split(VIDEO_PATH)
     name, ext = os.path.splitext(filename)
@@ -71,7 +71,8 @@ def main():
         return
     
     try:
-        yolo_model = YOLO(YOLO_MODEL_PATH).to("cuda")
+        yolo_model = YOLO(YOLO_MODEL_PATH,task="segment")
+        #yolo_model = YOLO(YOLO_MODEL_PATH).to("cuda")
         #yolo_model = YOLO(YOLO_MODEL_PATH)
         print(f"Modelo YOLO         : Carregado. Dispositivo: {yolo_model.device}")
     except Exception as e:
