@@ -73,4 +73,4 @@ python sky_seg.py
 - Ensure your **OpenCV CUDA DLLs** are available either in the system `PATH` or by adjusting the line in the script:
   ```python
   os.add_dll_directory(r"C:\LSIIM\sky_seg\opencv_dlls")
- ```
+ 
