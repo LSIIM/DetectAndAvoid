@@ -1,0 +1,4 @@
+```txt
+opencv-python
+numpy
+onnxruntime-gpu
