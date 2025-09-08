@@ -1,9 +1,9 @@
 # Sky Segmentation Project
 
 ## Overview
-This project implements **sky segmentation** in real time using **ONNX Runtime** and **OpenCV with CUDA** acceleration.  
-The provided ONNX model (`skyseg_fp16.onnx`) generates binary masks to distinguish **sky vs. non-sky regions** in videos or camera streams.
-More information about the model can be found at:
+- This project implements **sky segmentation** in real time using **ONNX Runtime** and **OpenCV with CUDA** acceleration.  
+- The provided ONNX model (`skyseg_fp16.onnx`) generates binary masks to distinguish **sky vs. non-sky regions** in videos or camera streams.
+- More information about the model can be found at:
 https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing/tree/1f7811b32b64ddc957269defff84bc87a3f0b74f
 
 ---
