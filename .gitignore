@@ -3,3 +3,5 @@ build/
 RF DETR/Weights/checkpoint.pth
 .venv/
 venv/
+.vscode/
+trt_Cache/
