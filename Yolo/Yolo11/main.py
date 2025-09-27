@@ -19,7 +19,7 @@ YOLO_CONFIDENCE = 0.5
 PROCESSING_WIDTH = 640
 PROCESSING_HEIGHT = 480
 HORIZON_MODEL_INPUT_SIZE = (320, 320)
-SEGMENTATION_UPDATE_INTERVAL = 20  # Atualiza segmentação a cada N frames
+SEGMENTATION_UPDATE_INTERVAL = 30  # Atualiza segmentação a cada N frames
 
 # Configurações do sistema de alerta de aproximação
 TRAIL_LENGTH = 50
@@ -203,7 +203,7 @@ def process_yolo_detections(frame, yolo_model, tracker_config, confidence_thresh
             
             # Adicionar label
             label_pos = (x1, y1 - 10 if y1 > 20 else y1 + 20)
-            cv.putText(frame, f"ID:{tid} {conf:.2f}", label_pos,
+            cv.putText(frame, f" {conf:.2f}", label_pos,
                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             # Atualizar histórico de tracking
@@ -368,9 +368,6 @@ def main():
         cv.putText(yolo_frame, f"FPS: {instant_fps:.1f}", (10, 30), 
                   cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Frame counter
-        cv.putText(yolo_frame, f"Frame: {frame_count}/{total_frames}", (10, 55),
-                  cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         # Desenhar alerta de aproximação
         draw_alert(yolo_frame, last_approach_time)
