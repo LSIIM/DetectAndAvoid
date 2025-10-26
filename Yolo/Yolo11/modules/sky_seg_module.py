@@ -25,10 +25,7 @@ class SkySegmentation:
         """
         # Carregar modelo
         try:
-            self.session = onnxruntime.InferenceSession(
-                model_path,
-                providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-            )
+            self.session = self._build_session(model_path)
             print(f"✓ Modelo de segmentação carregado: {self.session.get_providers()[0]}")
         except Exception as e:
             raise RuntimeError(f"Erro ao carregar modelo ONNX: {e}")
@@ -49,6 +46,36 @@ class SkySegmentation:
         self.sky_upper_threshold = sky_upper_threshold
         self.sky_lower_threshold = sky_lower_threshold
         self.binary_threshold = binary_threshold
+    
+    def _build_session(self, model_path):
+        """Constrói sessão ONNX com TensorRT se disponível"""
+        os.makedirs("trt_cache", exist_ok=True)
+        
+        so = onnxruntime.SessionOptions()
+        so.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        avail = onnxruntime.get_available_providers()
+        providers = []
+        
+        if "TensorrtExecutionProvider" in avail:
+            providers.append((
+                "TensorrtExecutionProvider",
+                {
+                    "trt_max_workspace_size": 1 << 30,
+                    "trt_fp16_enable": True,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": "trt_cache",
+                    "trt_builder_optimization_level": 5,
+                    "trt_timing_cache_enable": True,
+                    "trt_dla_enable": False,
+                },
+            ))
+        if "CUDAExecutionProvider" in avail:
+            providers.append("CUDAExecutionProvider")
+        providers.append("CPUExecutionProvider")
+        
+        return onnxruntime.InferenceSession(model_path, sess_options=so, providers=providers)
+    
     
     def process_frame(self, frame):
         """

@@ -13,6 +13,7 @@ from modules.sky_seg_module import SkySegmentation
 # Caminhos
 VIDEO_PATH = r"videos_test\droneVSdrone1.mp4"
 YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.pt"
+#YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.engine"
 HORIZON_MODEL_PATH = "Weights\skyseg_fp16.onnx"
 TRACKER_CONFIG = "bytetrack.yaml"
 

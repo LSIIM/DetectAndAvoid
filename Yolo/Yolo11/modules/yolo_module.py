@@ -37,8 +37,19 @@ class YOLODetector:
         
         # Carregar modelo
         try:
-            self.model = YOLO(model_path).to("cuda")
-            print(f"✓ Modelo YOLO carregado na GPU")
+            _, ext = os.path.splitext(model_path)
+            
+            if ext.lower() == '.engine':
+                # Modelo TensorRT
+                self.model = YOLO(model_path, task="segment")
+                print(f"✓ Modelo YOLO TensorRT carregado (.engine)")
+            elif ext.lower() == '.pt':
+                # Modelo PyTorch
+                self.model = YOLO(model_path).to("cuda")
+                print(f"✓ Modelo YOLO PyTorch carregado na GPU (.pt)")
+            else:
+                raise ValueError(f"Formato de modelo não suportado: {ext}. Use .pt ou .engine")
+                
         except Exception as e:
             raise RuntimeError(f"Erro ao carregar modelo YOLO: {e}")
         
