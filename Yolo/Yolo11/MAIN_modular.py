@@ -14,7 +14,10 @@ from modules.sky_seg_module import SkySegmentation
 VIDEO_PATH = r"videos_test\droneVSdrone1.mp4"
 YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.pt"
 #YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.engine"
+
 HORIZON_MODEL_PATH = "Weights\skyseg_fp16.onnx"
+USE_TENSORRT_SKYSEG = True
+
 TRACKER_CONFIG = "bytetrack.yaml"
 
 # Configurações de processamento
@@ -77,7 +80,8 @@ def main():
             sample_area_size=SAMPLE_AREA_SIZE,
             sky_upper_threshold=SKY_UPPER_THRESHOLD,
             sky_lower_threshold=SKY_LOWER_THRESHOLD,
-            binary_threshold=BINARY_THRESHOLD
+            binary_threshold=BINARY_THRESHOLD,
+            use_tensorrt=USE_TENSORRT_SKYSEG 
         )
     except Exception as e:
         print(f"✗ ERRO na inicialização: {e}")

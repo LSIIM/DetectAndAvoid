@@ -10,7 +10,7 @@ class SkySegmentation:
     
     def __init__(self, model_path, input_size=(320, 320), update_interval=30,
                  sample_area_size=30, sky_upper_threshold=0.75, 
-                 sky_lower_threshold=0.25, binary_threshold=128):
+                 sky_lower_threshold=0.25, binary_threshold=128, use_tensorrt=True):
         """
         Inicializa o segmentador de céu
         
@@ -25,7 +25,7 @@ class SkySegmentation:
         """
         # Carregar modelo
         try:
-            self.session = self._build_session(model_path)
+            self.session = self._build_session(model_path, use_tensorrt)
             print(f"✓ Modelo de segmentação carregado: {self.session.get_providers()[0]}")
         except Exception as e:
             raise RuntimeError(f"Erro ao carregar modelo ONNX: {e}")
@@ -47,7 +47,7 @@ class SkySegmentation:
         self.sky_lower_threshold = sky_lower_threshold
         self.binary_threshold = binary_threshold
     
-    def _build_session(self, model_path):
+    def _build_session(self, model_path, use_tensorrt):
         """Constrói sessão ONNX com TensorRT se disponível"""
         os.makedirs("trt_cache", exist_ok=True)
         
@@ -57,7 +57,8 @@ class SkySegmentation:
         avail = onnxruntime.get_available_providers()
         providers = []
         
-        if "TensorrtExecutionProvider" in avail:
+        if use_tensorrt and "TensorrtExecutionProvider" in avail:  
+            os.makedirs("trt_cache", exist_ok=True)
             providers.append((
                 "TensorrtExecutionProvider",
                 {
@@ -70,6 +71,7 @@ class SkySegmentation:
                     "trt_dla_enable": False,
                 },
             ))
+        
         if "CUDAExecutionProvider" in avail:
             providers.append("CUDAExecutionProvider")
         providers.append("CPUExecutionProvider")
