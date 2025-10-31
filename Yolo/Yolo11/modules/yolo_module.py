@@ -6,7 +6,6 @@ import numpy as np
 from ultralytics import YOLO
 from collections import deque
 
-# ============================= CLASSE YOLO DETECTOR =============================
 class YOLODetector:
     """Classe responsável por detecção e tracking com YOLO"""
     
@@ -31,11 +30,10 @@ class YOLODetector:
             alert_font_scale: Escala da fonte do alerta
             alert_thickness: Espessura do texto do alerta
         """
-        # Verificar GPU
+        
         if not torch.cuda.is_available():
             raise RuntimeError("GPU CUDA não disponível para YOLO")
         
-        # Carregar modelo
         try:
             _, ext = os.path.splitext(model_path)
             
@@ -57,17 +55,14 @@ class YOLODetector:
         self.confidence_threshold = confidence_threshold
         self.trail_length = trail_length
         
-        # Histórico de tracking
         self.track_history = {}
         self.track_colors = {}
-        
-        # Sistema de alertas de aproximação
+
         self.global_max_area = 0.0
         self.last_approach_time = 0.0
         self.approach_area_threshold = approach_threshold
         self.alert_duration = alert_duration
-        
-        # Configurações visuais do alerta
+
         self.alert_message = alert_message
         self.alert_text_color = alert_text_color
         self.alert_box_color = alert_box_color
@@ -86,7 +81,6 @@ class YOLODetector:
         """
         frame_processed = frame.copy()
         
-        # Executar YOLO com tracking
         results = self.model.track(
             frame_processed, 
             persist=True, 
@@ -110,25 +104,20 @@ class YOLODetector:
                 ids = results[0].boxes.id.int().cpu().tolist()
             else:
                 ids = list(range(len(boxes)))
-            
-            # Calcular área máxima do frame atual
+
             for box in boxes:
                 area = self._calculate_area(box)
                 if area > current_frame_max_area:
                     current_frame_max_area = area
-            
-            # Verificar aproximação
+
             if self.global_max_area > 0 and current_frame_max_area > self.global_max_area * self.approach_area_threshold:
                 approach_detected = True
                 self.last_approach_time = time.time()
-            
-            # Atualizar recorde global
+
             self.global_max_area = max(self.global_max_area, current_frame_max_area)
-            
-            # Desenhar detecções e trilhas
+
             self._draw_detections(frame_processed, boxes, confidences, ids)
-        
-        # Desenhar alerta de aproximação se necessário
+
         self._draw_alert(frame_processed)
         
         return frame_processed, approach_detected
@@ -143,16 +132,13 @@ class YOLODetector:
         for idx, (box, conf) in enumerate(zip(boxes, confidences)):
             tid = ids[idx] if idx < len(ids) else -1
             x1, y1, x2, y2 = box
-            
-            # Desenhar caixa
+
             cv.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            
-            # Adicionar label
             label_pos = (x1, y1 - 10 if y1 > 20 else y1 + 20)
             cv.putText(frame, f" {conf:.2f}", label_pos,
                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
-            # Atualizar histórico de tracking
+            
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
             if tid not in self.track_history:
                 self.track_history[tid] = deque(maxlen=self.trail_length)
@@ -163,7 +149,6 @@ class YOLODetector:
                 )
             self.track_history[tid].append((cx, cy))
             
-            # Desenhar trilha
             pts = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
             if len(pts) > 1:
                 cv.polylines(frame, [pts], False, self.track_colors[tid], 2)
