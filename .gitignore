@@ -4,5 +4,6 @@ RF DETR/Weights/checkpoint.pth
 .venv/
 venv/
 .vscode/
-trt_Cache/
+trt_cache/
 __pycache__/
+Videos/
