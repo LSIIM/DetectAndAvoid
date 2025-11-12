@@ -5,3 +5,4 @@ RF DETR/Weights/checkpoint.pth
 venv/
 .vscode/
 trt_Cache/
+__pycache__/

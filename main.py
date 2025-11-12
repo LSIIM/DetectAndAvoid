@@ -9,28 +9,22 @@ Usage:
     python main.py <video_path> [--clusters <num>] [--confidence <conf>]
 """
 
-import cv2
-import numpy as np
 import argparse
 import sys
-import os
 from pathlib import Path
+import torch
+import os
+import time
+import cv2
+import numpy as np
+import onnxruntime
+from ultralytics import YOLO
+from collections import deque
+from Yolo.Yolo11.modules.yolo_module import YOLODetector
+from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
+from OpticalFlow import opticalflow as optical_flow
 
-# Add module paths to sys.path
-PROJECT_ROOT = Path(__file__).parent
-sys.path.append(str(PROJECT_ROOT / "Yolo" / "Yolo11"))
-sys.path.append(str(PROJECT_ROOT / "Sky_Seg"))
-sys.path.append(str(PROJECT_ROOT / "OpticalFlow"))
-
-# Import modules (assuming they are modularized)
-try:
-    import yolo_detector
-    import sky_segmentation
-    import optical_flow
-except ImportError as e:
-    print(f"Error importing modules: {e}")
-    print("Please ensure all modules are properly modularized")
-    sys.exit(1)
+YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.pt"
 
 
 def parse_arguments():
@@ -41,9 +35,9 @@ def parse_arguments():
     parser.add_argument("--confidence", type=float, default=0.6, help="YOLO confidence threshold (default: 0.6)")
     parser.add_argument("--output", help="Output video path (optional)")
     parser.add_argument("--resize-height", type=int, default=480, help="Resize frame height (default: 480)")
+    parser.add_argument("--yolo-model-path", type=str, default=YOLO_MODEL_PATH, help="Path to YOLO model weights")
     
     return parser.parse_args()
-
 
 def setup_video_capture(video_path):
     """Setup video capture and get properties"""
@@ -57,7 +51,6 @@ def setup_video_capture(video_path):
     
     return cap, fps, frame_width, frame_height
 
-
 def setup_video_writer(output_path, fps, width, height):
     """Setup video writer if output path is provided"""
     if output_path:
@@ -66,6 +59,43 @@ def setup_video_writer(output_path, fps, width, height):
     return None
 
 
+# ============================= CONFIGURAÇÕES =============================
+# Caminhos
+
+HORIZON_MODEL_PATH = "Weights\skyseg_fp16.onnx"
+USE_TENSORRT_SKYSEG = True
+
+TRACKER_CONFIG = "bytetrack.yaml"
+
+# Configurações de processamento
+YOLO_CONFIDENCE = 0.5
+HORIZON_MODEL_INPUT_SIZE = (320, 320)
+SEGMENTATION_UPDATE_INTERVAL = 30  # Atualiza segmentação a cada N frames
+
+# Configurações do sistema de alerta de aproximação
+TRAIL_LENGTH = 50
+APPROACH_AREA_INCREASE_THRESHOLD = 1.1  # 10% de aumento
+ALERT_DURATION = 1.5  # segundos
+ALERT_MESSAGE = "# ALERTA: APROXIMACAO DETECTADA"
+ALERT_TEXT_COLOR = (0, 0, 255)  # vermelho
+ALERT_BOX_COLOR = (0, 0, 0)  # fundo preto
+ALERT_FONT_SCALE = 1
+ALERT_THICKNESS = 2
+
+# Configurações de análise de direção do voo
+SAMPLE_AREA_SIZE = 30  # Tamanho da área de amostragem no centro
+SKY_UPPER_THRESHOLD = 0.75  # Limiar para detectar SUBINDO
+SKY_LOWER_THRESHOLD = 0.25  # Limiar para detectar DESCENDO
+BINARY_THRESHOLD = 128  # Limiar para binarização da máscara
+
+# Configuração de saída
+input_dir, filename = os.path.split(VIDEO_PATH)
+name, ext = os.path.splitext(filename)
+OUTPUT_PATH = os.path.join(input_dir, f"{name}_unified_complete{ext}")
+
+
+
+# ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
     args = parse_arguments()
@@ -98,21 +128,38 @@ def main():
     # Setup modules
     print("\n--- Setting up modules ---")
     
-    try:
-        # YOLO setup
-        print("Setting up YOLO detector...")
-        yolo_context = yolo_detector.setup(confidence=args.confidence)
-        
-        # Sky Segmentation setup
-        print("Setting up Sky Segmentation...")
-        sky_context = sky_segmentation.setup()
-        
+    try:        
         # Optical Flow setup
         print("Setting up Optical Flow...")
         flow_context = optical_flow.setup(
             clusters=args.clusters, 
             fps=fps,
             processing_size=(processing_width, processing_height)
+        )
+        print("Setting up YOLO detector...")
+        yolo_detector = YOLODetector(
+            model_path=YOLO_MODEL_PATH,
+            tracker_config=TRACKER_CONFIG,
+            confidence_threshold=YOLO_CONFIDENCE,
+            trail_length=TRAIL_LENGTH,
+            approach_threshold=APPROACH_AREA_INCREASE_THRESHOLD,
+            alert_duration=ALERT_DURATION,
+            alert_message=ALERT_MESSAGE,
+            alert_text_color=ALERT_TEXT_COLOR,
+            alert_box_color=ALERT_BOX_COLOR,
+            alert_font_scale=ALERT_FONT_SCALE,
+            alert_thickness=ALERT_THICKNESS
+        )
+        print("Setting up Sky Segmentation...")
+        sky_segmentation = SkySegmentation(
+            model_path=HORIZON_MODEL_PATH,
+            input_size=HORIZON_MODEL_INPUT_SIZE,
+            update_interval=SEGMENTATION_UPDATE_INTERVAL,
+            sample_area_size=SAMPLE_AREA_SIZE,
+            sky_upper_threshold=SKY_UPPER_THRESHOLD,
+            sky_lower_threshold=SKY_LOWER_THRESHOLD,
+            binary_threshold=BINARY_THRESHOLD,
+            use_tensorrt=USE_TENSORRT_SKYSEG 
         )
         
         print("All modules setup successfully!")
@@ -127,6 +174,7 @@ def main():
     # Main processing loop
     print("\n--- Starting video processing ---")
     frame_count = 0
+    total_processing_start_time = time.time()
     
     try:
         while True:
@@ -134,14 +182,15 @@ def main():
             if not ret:
                 break
             
+            #frame_start_time = time.time()
             frame_count += 1
-            
+        
             # Resize frame for processing
             resized_frame = cv2.resize(frame, (processing_width, processing_height))
             
             # Process frame with each module
-            yolo_result = yolo_detector.process_frame(resized_frame, yolo_context)
-            sky_result = sky_segmentation.process_frame(resized_frame, sky_context)
+            yolo_result, approach_detected = yolo_detector.process_frame(resized_frame)
+            sky_result, flight_status, sky_ratio = sky_segmentation.process_frame(resized_frame)
             flow_result = optical_flow.process_frame(resized_frame, flow_context)
             
             # Create combined display
@@ -150,9 +199,9 @@ def main():
             # Add frame info
             info_text = f"Frame: {frame_count} | YOLO | Sky Seg | Optical Flow"
             cv2.putText(combined_frame, info_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(combined_frame, info_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
             
             # Write frame if output is specified
             if writer:
@@ -163,9 +212,7 @@ def main():
             
             # Handle keyboard input
             key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC
-                break
-            elif key == ord('q'):
+            if key == 27 or key == ord('q'):
                 break
             elif key == ord('s'):  # Save current frame
                 cv2.imwrite(f"frame_{frame_count:06d}.jpg", combined_frame)
@@ -174,7 +221,16 @@ def main():
             # Print progress every 100 frames
             if frame_count % 100 == 0:
                 print(f"Processed {frame_count} frames...")
-    
+        
+            
+            # Atualizar progresso
+            # if frame_count % 30 == 0:
+            #     elapsed_time = time.time() - total_processing_start_time
+            #     avg_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+            #     eta = ((elapsed_time / frame_count) * (total_frames - frame_count)) if frame_count > 0 else 0
+            #     progress = (frame_count / total_frames) * 100
+            #     print(f"Progresso: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
+            #           f"FPS médio: {avg_fps:.2f} | ETA: {eta:.1f}s")
     except KeyboardInterrupt:
         print("\nProcessing interrupted by user")
     
@@ -193,8 +249,8 @@ def main():
         
         # Cleanup modules
         try:
-            yolo_detector.cleanup(yolo_context)
-            sky_segmentation.cleanup(sky_context)
+            # yolo_detector.cleanup(yolo_context)
+            # sky_segmentation.cleanup(sky_context)
             optical_flow.cleanup(flow_context)
         except:
             pass
@@ -202,5 +258,5 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     sys.exit(main())
