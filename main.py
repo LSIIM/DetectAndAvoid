@@ -11,32 +11,31 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
-import torch
-import os
 import time
 import cv2
 import numpy as np
-import onnxruntime
-from ultralytics import YOLO
-from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from Yolo.Yolo11.modules.yolo_module import YOLODetector
 from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
 from OpticalFlow import opticalflow as optical_flow
 
-YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.pt"
+YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/yolo_11_JUNHO_nano_drones_DGX.engine"
+HORIZON_MODEL_PATH = r"Yolo/Yolo11/Weights/skyseg_fp16.onnx"
 
 
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="DetectAndAvoid Integrated Processing")
-    parser.add_argument("video_path", help="Path to input video file")
+    parser.add_argument("--video_path", default=0, help="Path to input video file")
     parser.add_argument("--clusters", type=int, default=5, help="Number of clusters for optical flow (default: 5)")
     parser.add_argument("--confidence", type=float, default=0.6, help="YOLO confidence threshold (default: 0.6)")
     parser.add_argument("--output", help="Output video path (optional)")
     parser.add_argument("--resize-height", type=int, default=480, help="Resize frame height (default: 480)")
     parser.add_argument("--yolo-model-path", type=str, default=YOLO_MODEL_PATH, help="Path to YOLO model weights")
-    
+    parser.add_argument("--horizon-model-path", type=str, default=HORIZON_MODEL_PATH, help="Path to Horizon model weights")
+    parser.add_argument("--segmentation-update-interval", type=int, default=30, help="Segmentation update interval (default: 30)")
+
     return parser.parse_args()
 
 def setup_video_capture(video_path):
@@ -62,7 +61,6 @@ def setup_video_writer(output_path, fps, width, height):
 # ============================= CONFIGURAÇÕES =============================
 # Caminhos
 
-HORIZON_MODEL_PATH = "Weights\skyseg_fp16.onnx"
 USE_TENSORRT_SKYSEG = True
 
 TRACKER_CONFIG = "bytetrack.yaml"
@@ -88,12 +86,31 @@ SKY_UPPER_THRESHOLD = 0.75  # Limiar para detectar SUBINDO
 SKY_LOWER_THRESHOLD = 0.25  # Limiar para detectar DESCENDO
 BINARY_THRESHOLD = 128  # Limiar para binarização da máscara
 
-# Configuração de saída
-input_dir, filename = os.path.split(VIDEO_PATH)
-name, ext = os.path.splitext(filename)
-OUTPUT_PATH = os.path.join(input_dir, f"{name}_unified_complete{ext}")
 
+# ============================= FUNÇÕES DE PROCESSAMENTO PARALELO =============================
+def process_yolo_threaded(frame, yolo_detector):
+    """Process YOLO detection in a separate thread"""
+    try:
+        return yolo_detector.process_frame(frame)
+    except Exception as e:
+        print(f"Error in YOLO processing: {e}")
+        return frame, False
 
+def process_sky_threaded(frame, sky_segmentation):
+    """Process sky segmentation in a separate thread"""
+    try:
+        return sky_segmentation.process_frame(frame)
+    except Exception as e:
+        print(f"Error in Sky Segmentation processing: {e}")
+        return frame, "UNKNOWN", 0.0
+
+def process_flow_threaded(frame, flow_context):
+    """Process optical flow in a separate thread"""
+    try:
+        return optical_flow.process_frame(frame, flow_context)
+    except Exception as e:
+        print(f"Error in Optical Flow processing: {e}")
+        return frame
 
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
@@ -138,7 +155,7 @@ def main():
         )
         print("Setting up YOLO detector...")
         yolo_detector = YOLODetector(
-            model_path=YOLO_MODEL_PATH,
+            model_path=args.yolo_model_path,
             tracker_config=TRACKER_CONFIG,
             confidence_threshold=YOLO_CONFIDENCE,
             trail_length=TRAIL_LENGTH,
@@ -152,9 +169,9 @@ def main():
         )
         print("Setting up Sky Segmentation...")
         sky_segmentation = SkySegmentation(
-            model_path=HORIZON_MODEL_PATH,
+            model_path=args.horizon_model_path,
             input_size=HORIZON_MODEL_INPUT_SIZE,
-            update_interval=SEGMENTATION_UPDATE_INTERVAL,
+            update_interval=args.segmentation_update_interval,
             sample_area_size=SAMPLE_AREA_SIZE,
             sky_upper_threshold=SKY_UPPER_THRESHOLD,
             sky_lower_threshold=SKY_LOWER_THRESHOLD,
@@ -171,8 +188,13 @@ def main():
             writer.release()
         return 1
     
+    # Setup thread pool for parallel processing
+    # Use 3 threads for 3 modules (optimal for Jetson Orin NX with 8 cores)
+    executor = ThreadPoolExecutor(max_workers=3)
+    
     # Main processing loop
     print("\n--- Starting video processing ---")
+    print("Using parallel processing with 3 threads")
     frame_count = 0
     total_processing_start_time = time.time()
     
@@ -182,22 +204,29 @@ def main():
             if not ret:
                 break
             
-            #frame_start_time = time.time()
+            frame_start_time = time.time()
             frame_count += 1
         
             # Resize frame for processing
             resized_frame = cv2.resize(frame, (processing_width, processing_height))
             
-            # Process frame with each module
-            yolo_result, approach_detected = yolo_detector.process_frame(resized_frame)
-            sky_result, flight_status, sky_ratio = sky_segmentation.process_frame(resized_frame)
-            flow_result = optical_flow.process_frame(resized_frame, flow_context)
+            # Submit all processing tasks in parallel
+            future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
+            future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
+            future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
+            
+            # Wait for all results (parallel execution happens here)
+            yolo_result, approach_detected = future_yolo.result()
+            sky_result, flight_status, sky_ratio = future_sky.result()
+            flow_result = future_flow.result()
+            
+            frame_processing_time = time.time() - frame_start_time
             
             # Create combined display
             combined_frame = np.hstack([yolo_result, sky_result, flow_result])
             
-            # Add frame info
-            info_text = f"Frame: {frame_count} | YOLO | Sky Seg | Optical Flow"
+            # Add frame info with processing time
+            info_text = f"Frame: {frame_count} | YOLO | Sky Seg | Optical Flow | {frame_processing_time*1000:.1f}ms"
             cv2.putText(combined_frame, info_text, (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(combined_frame, info_text, (10, 30), 
@@ -238,9 +267,17 @@ def main():
         print(f"Error during processing: {e}")
     
     finally:
+        # Shutdown thread pool
+        executor.shutdown(wait=True)
+        
         # Cleanup
+        total_time = time.time() - total_processing_start_time
+        avg_fps = frame_count / total_time if total_time > 0 else 0
+        
         print(f"\n--- Processing completed ---")
         print(f"Total frames processed: {frame_count}")
+        print(f"Total time: {total_time:.2f}s")
+        print(f"Average FPS: {avg_fps:.2f}")
         
         cap.release()
         if writer:
@@ -249,8 +286,6 @@ def main():
         
         # Cleanup modules
         try:
-            # yolo_detector.cleanup(yolo_context)
-            # sky_segmentation.cleanup(sky_context)
             optical_flow.cleanup(flow_context)
         except:
             pass
