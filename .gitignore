@@ -6,4 +6,3 @@ venv/
 .vscode/
 trt_cache/
 __pycache__/
-Videos/
