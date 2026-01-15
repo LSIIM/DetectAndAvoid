@@ -21,13 +21,13 @@ from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
 from OpticalFlow import opticalflow as optical_flow
 
 YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/yolo_11_JUNHO_nano_drones_DGX.engine"
-HORIZON_MODEL_PATH = r"Yolo/Yolo11/Weights/skyseg_fp16.onnx"
+HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
 
 
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="DetectAndAvoid Integrated Processing")
-    parser.add_argument("--video_path", default=0, help="Path to input video file")
+    parser.add_argument("--video-ip", default="192.168.144.25", help="IP address for RTSP video stream")
     parser.add_argument("--clusters", type=int, default=5, help="Number of clusters for optical flow (default: 5)")
     parser.add_argument("--confidence", type=float, default=0.6, help="YOLO confidence threshold (default: 0.6)")
     parser.add_argument("--output", help="Output video path (optional)")
@@ -38,11 +38,20 @@ def parse_arguments():
 
     return parser.parse_args()
 
-def setup_video_capture(video_path):
+def setup_video_capture(ip):
     """Setup video capture and get properties"""
-    cap = cv2.VideoCapture(video_path)
+    url = f"rtsp://{ip}:8554/main.264"
+
+    gst_pipeline_lowlat = (
+        f"uridecodebin uri={url} latency=50 ! "
+        "queue max-size-buffers=1 leaky=downstream ! "
+        "nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! "
+        "appsink sync=false max-buffers=1 drop=true"
+    )
+
+    cap = cv2.VideoCapture(gst_pipeline_lowlat, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
+        raise ValueError(f"Could not open video file: {url}")
     
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -118,14 +127,14 @@ def main():
     args = parse_arguments()
     
     print("=== DetectAndAvoid Integration System ===")
-    print(f"Video: {args.video_path}")
+    print(f"Video IP: {args.video_ip}")
     print(f"Clusters: {args.clusters}")
     print(f"YOLO Confidence: {args.confidence}")
     print("==========================================")
     
     # Setup video capture
     try:
-        cap, fps, orig_width, orig_height = setup_video_capture(args.video_path)
+        cap, fps, orig_width, orig_height = setup_video_capture(args.video_ip)
     except ValueError as e:
         print(f"Error: {e}")
         return 1

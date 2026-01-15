@@ -13,7 +13,7 @@ python main.py <video_path> [opções]
 
 ### Argumentos
 
-- `--video_path` (opcional): Caminho para o arquivo de vídeo de entrada 
+- `--video-ip <ip>` (opcional): Endereço de IP da câmera (padrão:192.168.144.25) 
 - `--clusters <num>` (opcional): Número de clusters para fluxo óptico (padrão: 5)
 - `--confidence <conf>` (opcional): Limiar de confiança do YOLO (padrão: 0.6)
 - `--output <caminho>` (opcional): Caminho do vídeo de saída
@@ -23,13 +23,13 @@ python main.py <video_path> [opções]
 
 ```bash
 # Uso básico
-python main.py videos/drone_video.mp4
+python main.py
 
 # Com parâmetros personalizados
-python main.py videos/drone_video.mp4 --clusters 3 --confidence 0.7
+python main.py --video-ip 192.168.144.25 --clusters 3 --confidence 0.7
 
 # Salvar vídeo de saída
-python main.py videos/drone_video.mp4 --output processed_output.mp4
+python main.py --video-ip 192.168.144.25 --output processed_output.mp4
 ```
 
 ### Controles
