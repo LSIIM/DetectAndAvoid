@@ -8,7 +8,7 @@ O sistema de integração principal combina detecção YOLO, Segmentação de C�
 ### Uso
 
 ```bash
-python main.py <video_path> [opções]
+python main.py [flags]
 ```
 
 ### Argumentos
