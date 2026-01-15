@@ -1,0 +1,34 @@
+# DetectAndAvoid - Requirements
+# Consolidated dependencies for all project modules
+
+# Computer Vision & Image Processing
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Deep Learning Frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLO & Object Detection
+ultralytics>=8.0.0
+
+# ONNX Runtime (GPU support for Sky Segmentation)
+onnxruntime-gpu>=1.16.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+
+# SAM2 and Supervision (for SAM module)
+supervision>=0.20.0
+# sam2  # Install separately following SAM2 documentation
+
+# RF-DETR (if using custom model)
+# rfdetr  # Install separately if needed
+
+# Jupyter (for notebook support)
+ipython>=8.12.0
+jupyter>=1.0.0
+
+# Additional utilities
+argparse  # Usually included in Python standard library
