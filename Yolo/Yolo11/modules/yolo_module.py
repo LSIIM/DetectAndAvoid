@@ -11,6 +11,7 @@ class YOLODetector:
     
     def __init__(self, model_path, tracker_config, confidence_threshold, 
                  trail_length=50, approach_threshold=1.1, alert_duration=1.5,
+                 no_det_reset_sec=1.5,
                  alert_message="# ALERTA: APROXIMACAO DETECTADA",
                  alert_text_color=(0, 0, 255), alert_box_color=(0, 0, 0),
                  alert_font_scale=1, alert_thickness=2):
@@ -60,8 +61,10 @@ class YOLODetector:
 
         self.global_max_area = 0.0
         self.last_approach_time = 0.0
+        self.last_detection_time = 0.0
         self.approach_area_threshold = approach_threshold
         self.alert_duration = alert_duration
+        self.no_det_reset_sec = no_det_reset_sec
 
         self.alert_message = alert_message
         self.alert_text_color = alert_text_color
@@ -91,9 +94,14 @@ class YOLODetector:
         
         approach_detected = False
         current_frame_max_area = 0.0
+        now = time.time()
         
+        has_detection = False
         if results and results[0].boxes is not None and results[0].boxes.xyxy is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
+            if len(boxes) > 0:
+                has_detection = True
+                self.last_detection_time = now
             
             if results[0].boxes.conf is not None:
                 confidences = results[0].boxes.conf.cpu().numpy()
@@ -117,6 +125,10 @@ class YOLODetector:
             self.global_max_area = max(self.global_max_area, current_frame_max_area)
 
             self._draw_detections(frame_processed, boxes, confidences, ids)
+
+        if not has_detection:
+            if self.last_detection_time > 0 and (now - self.last_detection_time) > self.no_det_reset_sec:
+                self.global_max_area = 0.0
 
         self._draw_alert(frame_processed)
         
