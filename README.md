@@ -61,7 +61,7 @@ python .\Yolo\Yolo11\yolo_to_TensorRT.py
 ### Uso
 
 ```bash
-python main.py <video_path> [opções]
+python main.py [flags]
 ```
 
 ### Argumentos
