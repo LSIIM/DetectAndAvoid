@@ -5,14 +5,38 @@ import skfuzzy as fuzz
 import random
 import sys
 
+class TrackedPoint:
+    """Represents a tracked point with unique ID"""
+    _next_id = 0  # Global counter for unique IDs
+    
+    @classmethod
+    def get_next_id(cls):
+        """Get next unique ID"""
+        current_id = cls._next_id
+        cls._next_id += 1
+        return current_id
+    
+    @classmethod
+    def reset_counter(cls):
+        """Reset ID counter (useful for testing)"""
+        cls._next_id = 0
+    
+    def __init__(self, position):
+        self.id = TrackedPoint.get_next_id()
+        self.position = position
+    
+    def __repr__(self):
+        return f"TrackedPoint(id={self.id}, pos={self.position})"
+
 class OpticalFlowContext:
     """Context class to store optical flow state"""
     def __init__(self):
         self.number_clusters = 5
         self.fps = 30
         self.processing_size = (640, 480)
-        self.max_point = 100
-        self.max_path_length = 10
+        self.max_point = 30
+        self.max_path_length = 20
+        self.debug = False
         
         # Feature detection parameters
         self.feature_params = dict(
@@ -33,12 +57,24 @@ class OpticalFlowContext:
         self.p0 = None
         self.old_gray = None
         self.mask = None
-        self.paths = []
+        self.paths = []  # Legacy - will be replaced
         self.frame_iter = 0
         self.previous_centroids = None
         self.cluster_id_mapping = None
+        self.previous_u = None  # Store previous fuzzy membership matrix
+        self.previous_n_points = 0  # Store number of points from previous clustering
         self.colors = None
         self.start_time = None
+        
+        # ID-based tracking dictionaries
+        self.tracked_points = {}  # {point_id: TrackedPoint}
+        self.point_paths = {}  # {point_id: [positions]}
+        self.point_clusters = {}  # {point_id: cluster_id}
+        
+        # Detection mask for avoiding problematic regions
+        self.detection_mask = None
+        self.mask_recovery_rate = 2  # Value added per frame to recover regions
+        self.invalid_region_radius = 20  # Radius around invalid points to block
 
 def generate_random_colors(n_colors):
     """Generate n_colors random colors with good visibility"""
@@ -74,15 +110,33 @@ def initialize_tracking(frame, context):
     frame_resized = cv2.resize(frame, context.processing_size)
     context.old_gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
     
+    # Initialize detection mask (255 = allowed, 0 = blocked)
+    if context.detection_mask is None:
+        context.detection_mask = np.ones(context.old_gray.shape, dtype=np.uint8) * 255
+    
+    # Create binary mask for goodFeaturesToTrack (only 0 and 255)
+    binary_mask = (context.detection_mask > 127).astype(np.uint8) * 255
+    
     # Find initial features
-    context.p0 = cv2.goodFeaturesToTrack(context.old_gray, mask=None, **context.feature_params)
+    context.p0 = cv2.goodFeaturesToTrack(context.old_gray, mask=binary_mask, **context.feature_params)
     
     if context.p0 is None:
         return False
-        
+    
     # Initialize mask
     context.mask = np.zeros_like(frame_resized)
     context.paths = []
+    
+    # Create tracked points with unique IDs
+    context.tracked_points.clear()
+    context.point_paths.clear()
+    context.point_clusters.clear()
+    
+    for point in context.p0.reshape(-1, 2):
+        tracked_pt = TrackedPoint(point)
+        context.tracked_points[tracked_pt.id] = tracked_pt
+        context.point_paths[tracked_pt.id] = []
+        context.point_clusters[tracked_pt.id] = 0
     
     return True
 
@@ -102,12 +156,39 @@ def process_frame(frame, context):
     
     frame_gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
     
+    # Get current tracked point IDs and positions
+    point_ids = list(context.tracked_points.keys())
+    if len(point_ids) == 0:
+        initialize_tracking(frame, context)
+        return frame_resized
+    
+    # Build p0 array from tracked points
+    context.p0 = np.array([context.tracked_points[pid].position for pid in point_ids]).reshape(-1, 1, 2)
+    
     # Calculate optical flow
     p1, st, err = cv2.calcOpticalFlowPyrLK(context.old_gray, frame_gray, context.p0, None, **context.lk_params)
     
-    # Select good points
-    good_new = p1[st == 1]
-    good_old = context.p0[st == 1]
+    # Map results back to point IDs
+    good_ids = []
+    good_new = []
+    good_old = []
+    
+    for i, (pid, status) in enumerate(zip(point_ids, st.flatten())):
+        if status == 1:
+            good_ids.append(pid)
+            good_new.append(p1[i][0])
+            good_old.append(context.p0[i][0])
+    
+    # Remove lost points
+    for pid in point_ids:
+        if pid not in good_ids:
+            del context.tracked_points[pid]
+            del context.point_paths[pid]
+            if pid in context.point_clusters:
+                del context.point_clusters[pid]
+    
+    good_new = np.array(good_new)
+    good_old = np.array(good_old)
     
     if len(good_new) == 0:
         # Reinitialize if no good points
@@ -117,30 +198,118 @@ def process_frame(frame, context):
     # Calculate velocities
     uvs = (good_new - good_old) * context.fps
     
-    # Update paths for each point
-    if len(context.paths) == 0:
-        context.paths = [[] for _ in range(len(good_new))]
+    # Update paths and positions for each tracked point
+    for i, pid in enumerate(good_ids):
+        # Update position
+        context.tracked_points[pid].position = good_new[i]
+        
+        # Update path
+        context.point_paths[pid].append(good_new[i])
+        # Keep only recent path history
+        if len(context.point_paths[pid]) > context.max_path_length:
+            context.point_paths[pid] = context.point_paths[pid][-context.max_path_length:]
     
-    # Adjust paths array size to match current points
-    if len(context.paths) != len(good_new):
-        if len(context.paths) > len(good_new):
-            # Remove excess paths (points were lost)
-            context.paths = context.paths[:len(good_new)]
+    # Verify tracking consistency - remove points with erratic movement
+    valid_ids = []
+    invalid_ids = []
+    min_frames_check = 5  # Number of frames to analyze
+    inconsistency_threshold = 0.85  # 50% of transitions must be bad to invalidate
+    
+    for i, pid in enumerate(good_ids):
+        is_valid = True
+        
+        # Need at least min_frames_check frames of history to check consistency
+        if len(context.point_paths[pid]) >= min_frames_check:
+            recent_positions = context.point_paths[pid][-min_frames_check:]  # Last N positions
+            
+            # Calculate velocities from consecutive positions
+            recent_vels = []
+            for j in range(len(recent_positions) - 1):
+                vel = (recent_positions[j + 1] - recent_positions[j]) * context.fps
+                recent_vels.append(vel)
+            
+            if len(recent_vels) < 2:
+                # Not enough velocities to check consistency
+                valid_ids.append(pid)
+                continue
+            
+            invalid_transitions = 0
+            total_transitions = 0
+            
+            # Check all consecutive velocity pairs
+            for j in range(len(recent_vels) - 1):
+                vel1 = recent_vels[j]
+                vel2 = recent_vels[j + 1]
+                
+                # Calculate velocity magnitudes
+                mag1 = np.linalg.norm(vel1)
+                mag2 = np.linalg.norm(vel2)
+                
+                # Only check if velocities are significant (not stationary)
+                if mag1 > 2.0 and mag2 > 2.0:
+                    total_transitions += 1
+                    
+                    # Calculate angle difference between consecutive velocities
+                    dot_product = np.dot(vel1, vel2)
+                    cos_angle = dot_product / (mag1 * mag2)
+                    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                    angle_diff = np.arccos(cos_angle)
+                    
+                    # Check for sudden direction change (> 90 degrees)
+                    if angle_diff > np.pi / 2:
+                        invalid_transitions += 1
+                        continue
+                    
+                    # Check for sudden magnitude change (> 3x increase/decrease)
+                    mag_ratio = max(mag1, mag2) / (min(mag1, mag2) + 1e-6)
+                    if mag_ratio > 3.0:
+                        invalid_transitions += 1
+            
+            # Mark as invalid only if most transitions are inconsistent
+            if total_transitions > 0:
+                inconsistency_ratio = invalid_transitions / total_transitions
+                if inconsistency_ratio >= inconsistency_threshold:
+                    is_valid = False
+        
+        if is_valid:
+            valid_ids.append(pid)
         else:
-            # Add new paths (new points detected)
-            context.paths.extend([[] for _ in range(len(good_new) - len(context.paths))])
+            invalid_ids.append(pid)
+            # Mark invalid point region in detection mask
+            point_pos = good_new[i].astype(int)
+            cv2.circle(context.detection_mask, tuple(point_pos), 
+                      context.invalid_region_radius, 0, -1)
     
-    # Update each point's path with current velocity
-    for i in range(len(good_new)):
-        if i < len(uvs):
-            context.paths[i].append(uvs[i])
-            # Keep only recent path history
-            if len(context.paths[i]) > context.max_path_length:
-                context.paths[i] = context.paths[i][-context.max_path_length:]
+    # Remove invalid points from tracking
+    for pid in invalid_ids:
+        if pid in context.tracked_points:
+            del context.tracked_points[pid]
+        if pid in context.point_paths:
+            del context.point_paths[pid]
+        if pid in context.point_clusters:
+            del context.point_clusters[pid]
+    
+    # Filter out invalid points from current frame arrays
+    if len(valid_ids) < len(good_ids):
+        valid_indices = [i for i, pid in enumerate(good_ids) if pid in valid_ids]
+        good_ids = valid_ids
+        good_new = good_new[valid_indices]
+        good_old = good_old[valid_indices]
+        uvs = uvs[valid_indices]
+        
+        if len(good_new) == 0:
+            # All points were invalid, reinitialize
+            initialize_tracking(frame, context)
+            return frame_resized
+    
+    # Gradually recover detection mask (add value to all pixels)
+    context.detection_mask = np.clip(context.detection_mask.astype(np.int16) + context.mask_recovery_rate, 
+                                     0, 255).astype(np.uint8)
     
     # Calculate average path vectors for clustering
     path_vectors = []
-    for path in context.paths:
+    for pid in good_ids:
+        path = context.point_paths[pid]
         if len(path) > 0:
             # Calculate average velocity over the path
             avg_path = np.mean(path, axis=0)
@@ -159,11 +328,25 @@ def process_frame(frame, context):
         
         try:
             # Perform fuzzy c-means clustering with 50 iterations
+            # Use previous membership matrix for warm start if available and point count matches
+            init_u = context.previous_u if (context.previous_u is not None and context.previous_n_points == len(good_new)) else None
+            
             cntr, u, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
-                alldata, context.number_clusters, 2, error=0.005, maxiter=50, init=None)
+                alldata, context.number_clusters, 2, error=0.005, maxiter=50, init=init_u)
+            
+            # Store current membership matrix and point count for next frame
+            context.previous_u = u.copy()
+            context.previous_n_points = len(good_new)
             
             # Get cluster membership for each point
             raw_membership = np.argmax(u, axis=0)
+            
+            # Detect outliers based on fuzzy membership strength
+            membership_threshold = 0.55  # Minimum membership value to belong to a cluster
+            max_memberships = np.max(u, axis=0)  # Maximum membership value for each point
+            
+            # Mark points with low membership as outliers (-1)
+            outlier_mask = max_memberships < membership_threshold
             
             # Handle cluster tracking for consistent colors
             if context.previous_centroids is not None:
@@ -176,7 +359,7 @@ def process_frame(frame, context):
                         vel_dist = np.linalg.norm(curr_center[2:4] - prev_center[2:4])
                         path_dist = np.linalg.norm(curr_center[4:6] - prev_center[4:6])
                         # Combined distance with weights
-                        distances[i, j] = 0.5 * pos_dist + 0.25 * vel_dist + 0.25 * path_dist
+                        distances[i, j] = 0.2 * pos_dist + 0.4 * vel_dist + 0.4 * path_dist
                 
                 # Create mapping using greedy approach
                 used_prev_ids = set()
@@ -200,35 +383,73 @@ def process_frame(frame, context):
                 
                 context.cluster_id_mapping = new_mapping
                 
-                # Remap cluster membership
-                cluster_membership = [context.cluster_id_mapping[raw_membership[i]] for i in range(len(raw_membership))]
+                # Remap cluster membership, marking outliers as -1
+                cluster_membership = []
+                for i in range(len(raw_membership)):
+                    if outlier_mask[i]:
+                        cluster_membership.append(-1)  # Outlier
+                    else:
+                        cluster_membership.append(context.cluster_id_mapping[raw_membership[i]])
             else:
                 # First frame - initialize mapping
                 context.cluster_id_mapping = {i: i for i in range(context.number_clusters)}
-                cluster_membership = raw_membership.tolist()
+                cluster_membership = []
+                for i in range(len(raw_membership)):
+                    if outlier_mask[i]:
+                        cluster_membership.append(-1)  # Outlier
+                    else:
+                        cluster_membership.append(raw_membership[i])
             
             # Update previous centroids
             context.previous_centroids = cntr.copy()
             
+            # Store cluster membership by ID (-1 for outliers)
+            for i, pid in enumerate(good_ids):
+                context.point_clusters[pid] = cluster_membership[i]
+            
         except:
             # Fallback if clustering fails
             cluster_membership = [0] * len(good_new)
+            for pid in good_ids:
+                context.point_clusters[pid] = 0
     else:
         # Not enough points for clustering, assign all to cluster 0
         cluster_membership = [0] * len(good_new)
+        for pid in good_ids:
+            context.point_clusters[pid] = 0
+
+    # print clusters distances from each other
+    # for c in cntr:
+    #     print(f"Cluster center at ({c[0]:.1f}, {c[1]:.1f}) with velocity ({c[2]:.1f}, {c[3]:.1f})")
 
     # Draw the tracks with cluster colors
     result_frame = frame_resized.copy()
-    for i, (new, old) in enumerate(zip(good_new, good_old)):
+    for i, pid in enumerate(good_ids):
+        new = good_new[i]
         a, b = int(new[0]), int(new[1])
-        c, d = int(old[0]), int(old[1])
         
-        # Use cluster color
-        cluster_id = cluster_membership[i] if i < len(cluster_membership) else 0
-        color = context.colors[cluster_id % len(context.colors)]
+        # Use cluster color or gray for outliers
+        cluster_id = context.point_clusters.get(pid, 0)
+        if cluster_id == -1:
+            # Outlier - use gray color
+            color = (128, 128, 128)
+        else:
+            color = context.colors[cluster_id % len(context.colors)]
         
-        context.mask = cv2.line(context.mask, (a, b), (c, d), color, 2)
+        # Draw current point
         result_frame = cv2.circle(result_frame, (a, b), 5, color, -1)
+        
+        # Draw path if it has points
+        path = context.point_paths[pid]
+        if len(path) > 0:
+            pts = np.array(path, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(context.mask, [pts], False, color, 2)
+        
+        # Optional: Draw point ID for debugging
+        # if context.debug:
+        #     cv2.putText(result_frame, str(pid), (a + 8, b - 8), 
+        #                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+
 
     # Draw cluster centroids and their velocity vectors (if clustering was successful)
     if len(good_new) >= context.number_clusters and 'cntr' in locals():
@@ -250,9 +471,14 @@ def process_frame(frame, context):
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 cv2.putText(result_frame, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                # Draw centroid circle
+                # cv2.circle(result_frame, center_pos, 8, color, -1)
+                # Draw velocity vector
+                end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
+                # cv2.arrowedLine(result_frame, center_pos, end_pos, color, 2, tipLength=0.3)
 
     # Combine frame with mask
-    img = cv2.add(result_frame, context.mask)
+    img = cv2.addWeighted(result_frame, 1, context.mask, 0.5, 0)
 
     # Calculate and display FPS
     end_time = time.perf_counter()
@@ -262,9 +488,9 @@ def process_frame(frame, context):
         processing_fps = 0
     
     # Display FPS on frame
-    fps_text = f"FPS: {int(processing_fps)}"
-    cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 3)
-    cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    # fps_text = f"FPS: {int(processing_fps)}"
+    # cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 3)
+    # cv2.putText(img, fps_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
 
     # Update for next iteration
     context.old_gray = frame_gray.copy()
@@ -275,8 +501,11 @@ def process_frame(frame, context):
         # Get current good points as starting point
         tmp_p = good_new.copy()
         
-        # Find new feature points
-        new_features = cv2.goodFeaturesToTrack(context.old_gray, mask=None, **context.feature_params)
+        # Create binary mask for goodFeaturesToTrack (only 0 and 255)
+        binary_mask = (context.detection_mask > 127).astype(np.uint8) * 255
+        
+        # Find new feature points using detection mask
+        new_features = cv2.goodFeaturesToTrack(context.old_gray, mask=binary_mask, **context.feature_params)
         
         if new_features is not None:
             new_features = new_features.reshape(-1, 2)
@@ -291,6 +520,11 @@ def process_frame(frame, context):
                         break
                 
                 if add_point:
+                    # Create new tracked point with unique ID
+                    tracked_pt = TrackedPoint(new_pt)
+                    context.tracked_points[tracked_pt.id] = tracked_pt
+                    context.point_paths[tracked_pt.id] = []
+                    context.point_clusters[tracked_pt.id] = 0
                     # Add to p0 for next iteration
                     tmp_p = np.vstack([tmp_p, new_pt]) if len(tmp_p) > 0 else new_pt.reshape(-1, 2)
             
@@ -299,11 +533,12 @@ def process_frame(frame, context):
         
         # Reset iteration counter and clear tracking data
         context.frame_iter = -1
-        context.paths = []  # Clear paths
-        context.mask = np.zeros_like(frame_resized)  # Reset mask
-    
+        #context.paths = []  # Clear paths
+    context.mask = np.zeros_like(frame_resized)  # Reset mask
     context.frame_iter += 1
     context.start_time = end_time
+
+    # print(f"Tracked points: {len(context.tracked_points)}")
     
     return img
 
@@ -314,6 +549,10 @@ def cleanup(context):
         context.old_gray = None
         context.mask = None
         context.paths = []
+        context.tracked_points.clear()
+        context.point_paths.clear()
+        context.point_clusters.clear()
+        TrackedPoint.reset_counter()
 
 # Standalone execution for testing
 if __name__ == "__main__":
@@ -340,12 +579,17 @@ if __name__ == "__main__":
     fps = capture.get(cv2.CAP_PROP_FPS)
     
     # Setup optical flow
-    context = setup(clusters=number_clusters, fps=fps)
+    context = setup(clusters=number_clusters, fps=fps, processing_size=(853, 480))
     
     print(f"Processing video: {filename}")
     print(f"Clusters: {number_clusters}")
     print(f"FPS: {fps}")
-    
+    ret, frame = capture.read()
+    frame = cv2.resize(frame, context.processing_size)
+    cv2.imshow("Optical Flow", frame)
+    cv2.imshow("Debug Mask", frame)
+    cv2.waitKey(0)
+
     while True:
         ret, frame = capture.read()
         if not ret:
@@ -356,6 +600,69 @@ if __name__ == "__main__":
         
         # Display result
         cv2.imshow("Optical Flow", result)
+
+        debug = np.ones(result.shape, dtype=np.uint8) * 255
+        
+        # Group points by cluster (excluding outliers)
+        cluster_points = {}
+        for pid, cluster_id in context.point_clusters.items():
+            if pid in context.tracked_points and cluster_id != -1:  # Exclude outliers
+                if cluster_id not in cluster_points:
+                    cluster_points[cluster_id] = []
+                cluster_points[cluster_id].append(context.tracked_points[pid].position)
+        
+        for i, centroid in enumerate(context.previous_centroids if context.previous_centroids is not None else []):
+            if i < len(context.colors):
+                # Get mapped cluster ID
+                mapped_id = context.cluster_id_mapping.get(i, i) if context.cluster_id_mapping else i
+                color = context.colors[mapped_id % len(context.colors)]
+                
+                # Extract and paste ROI containing all cluster points
+                if mapped_id in cluster_points and len(cluster_points[mapped_id]) > 0:
+                    points = np.array(cluster_points[mapped_id])
+                    
+                    # Calculate bounding box with margin
+                    margin = 20
+                    x_min = max(0, int(np.min(points[:, 0])) - margin)
+                    x_max = min(result.shape[1], int(np.max(points[:, 0])) + margin)
+                    y_min = max(0, int(np.min(points[:, 1])) - margin)
+                    y_max = min(result.shape[0], int(np.max(points[:, 1])) + margin)
+                    
+                    # Extract ROI from result frame
+                    if x_max > x_min and y_max > y_min:
+                        roi = cv2.resize(frame, context.processing_size)[y_min:y_max, x_min:x_max].copy()
+                        
+                        # Draw border around ROI
+                        cv2.rectangle(roi, (0, 0), (roi.shape[1]-1, roi.shape[0]-1), color, 2)
+                        
+                        # Paste ROI at its original position in debug
+                        debug[y_min:y_max, x_min:x_max] = roi
+                        
+                        # Draw line connecting centroid to ROI center
+                        roi_center = (x_min + roi.shape[1]//2, y_min + roi.shape[0]//2)
+                
+                # Draw centroid position
+                center_pos = (int(centroid[0]), int(centroid[1]))
+                
+                # Display velocity magnitude
+                vel_magnitude = np.sqrt(centroid[2]**2 + centroid[3]**2)
+                vel_text = f"V:{vel_magnitude:.1f}"
+                
+                # Display current velocity
+                cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                # Draw centroid circle
+                cv2.circle(debug, center_pos, 8, color, -1)
+                # Draw velocity vector
+                end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
+                cv2.arrowedLine(debug, center_pos, end_pos, color, 2, tipLength=0.3)
+
+        cv2.imshow("Debug Mask", debug)
+        # Display detection mask
+        if context.detection_mask is not None:
+            cv2.imshow("Detection Mask", context.detection_mask)
         
         key = cv2.waitKey(1) & 0xFF
         if key == 27 or key == ord('q'):  # ESC or 'q'
@@ -366,6 +673,8 @@ if __name__ == "__main__":
                 # Reset cluster tracking when changing number of clusters
                 context.previous_centroids = None
                 context.cluster_id_mapping = None
+                context.previous_u = None
+                context.previous_n_points = 0
                 print(f"Clusters increased to: {context.number_clusters}")
         elif key == ord('-'):  # Decrease clusters
             if context.number_clusters > 2:
@@ -373,6 +682,8 @@ if __name__ == "__main__":
                 # Reset cluster tracking when changing number of clusters
                 context.previous_centroids = None
                 context.cluster_id_mapping = None
+                context.previous_u = None
+                context.previous_n_points = 0
                 print(f"Clusters decreased to: {context.number_clusters}")
 
     # Cleanup
