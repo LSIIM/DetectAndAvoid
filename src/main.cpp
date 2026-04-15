@@ -2620,8 +2620,149 @@ public:
     }
 
 private:
+    static float pointNorm(const cv::Point2f& p) {
+        return std::sqrt(p.x * p.x + p.y * p.y);
+    }
+
+    static cv::Mat buildBinaryMask(const cv::Mat& detection_mask) {
+        cv::Mat binary;
+        cv::threshold(detection_mask, binary, 127, 255, cv::THRESH_BINARY);
+        return binary;
+    }
+
+    int createTrackedPoint(const cv::Point2f& pos) {
+        const int id = next_point_id_++;
+        tracked_points_[id] = pos;
+        point_paths_[id] = {};
+        point_clusters_[id] = 0;
+        return id;
+    }
+
+    void eraseTrackedPoint(int id) {
+        tracked_points_.erase(id);
+        point_paths_.erase(id);
+        point_clusters_.erase(id);
+    }
+
+    void initializeDetectionMaskIfNeeded(const cv::Size& gray_size) {
+        if (detection_mask_.empty() || detection_mask_.size() != gray_size) {
+            detection_mask_ = cv::Mat(gray_size, CV_8U, cv::Scalar(255));
+        }
+    }
+
+    bool runFuzzyCMeans(
+        const cv::Mat& data,
+        int clusters,
+        float fuzziness,
+        float error,
+        int max_iter,
+        const cv::Mat& init_u,
+        cv::Mat& centers_out,
+        cv::Mat& membership_out
+    ) {
+        if (data.empty() || clusters <= 0 || data.rows < clusters) {
+            return false;
+        }
+
+        const int n_points = data.rows;
+        const int dims = data.cols;
+        cv::Mat u;
+
+        if (!init_u.empty() && init_u.rows == clusters && init_u.cols == n_points && init_u.type() == CV_32F) {
+            u = init_u.clone();
+        } else {
+            u = cv::Mat(clusters, n_points, CV_32F);
+            cv::RNG rng(42);
+            for (int j = 0; j < n_points; ++j) {
+                float sum = 0.0F;
+                for (int i = 0; i < clusters; ++i) {
+                    const float v = rng.uniform(0.001F, 1.0F);
+                    u.at<float>(i, j) = v;
+                    sum += v;
+                }
+                if (sum <= 0.0F) {
+                    sum = 1.0F;
+                }
+                for (int i = 0; i < clusters; ++i) {
+                    u.at<float>(i, j) /= sum;
+                }
+            }
+        }
+
+        cv::Mat centers(clusters, dims, CV_32F, cv::Scalar(0));
+        cv::Mat prev_u = u.clone();
+        const float exp = 2.0F / (fuzziness - 1.0F);
+
+        for (int iter = 0; iter < max_iter; ++iter) {
+            for (int i = 0; i < clusters; ++i) {
+                float denom = 0.0F;
+                cv::Mat num(1, dims, CV_32F, cv::Scalar(0));
+                for (int j = 0; j < n_points; ++j) {
+                    const float uij = u.at<float>(i, j);
+                    const float w = std::pow(std::max(0.0F, uij), fuzziness);
+                    denom += w;
+                    for (int d = 0; d < dims; ++d) {
+                        num.at<float>(0, d) += w * data.at<float>(j, d);
+                    }
+                }
+                if (denom <= 1e-9F) {
+                    continue;
+                }
+                for (int d = 0; d < dims; ++d) {
+                    centers.at<float>(i, d) = num.at<float>(0, d) / denom;
+                }
+            }
+
+            for (int j = 0; j < n_points; ++j) {
+                std::vector<float> dists(static_cast<size_t>(clusters), 0.0F);
+                int zero_idx = -1;
+                for (int i = 0; i < clusters; ++i) {
+                    float accum = 0.0F;
+                    for (int d = 0; d < dims; ++d) {
+                        const float diff = data.at<float>(j, d) - centers.at<float>(i, d);
+                        accum += diff * diff;
+                    }
+                    dists[static_cast<size_t>(i)] = std::sqrt(accum);
+                    if (dists[static_cast<size_t>(i)] <= 1e-9F) {
+                        zero_idx = i;
+                    }
+                }
+
+                if (zero_idx >= 0) {
+                    for (int i = 0; i < clusters; ++i) {
+                        u.at<float>(i, j) = (i == zero_idx) ? 1.0F : 0.0F;
+                    }
+                    continue;
+                }
+
+                for (int i = 0; i < clusters; ++i) {
+                    float denom = 0.0F;
+                    const float dij = std::max(dists[static_cast<size_t>(i)], 1e-9F);
+                    for (int k = 0; k < clusters; ++k) {
+                        const float dkj = std::max(dists[static_cast<size_t>(k)], 1e-9F);
+                        denom += std::pow(dij / dkj, exp);
+                    }
+                    u.at<float>(i, j) = (denom <= 1e-9F) ? (1.0F / static_cast<float>(clusters)) : (1.0F / denom);
+                }
+            }
+
+            cv::Mat diff;
+            cv::absdiff(u, prev_u, diff);
+            double max_diff = 0.0;
+            cv::minMaxLoc(diff, nullptr, &max_diff);
+            if (max_diff < static_cast<double>(error)) {
+                break;
+            }
+            prev_u = u.clone();
+        }
+
+        centers_out = centers;
+        membership_out = u;
+        return true;
+    }
+
     cv::Mat processFrameCpu(const cv::Mat& frame_resized) {
-        if (old_gray_.empty() || points_.empty()) {
+        if (old_gray_.empty() || tracked_points_.empty()) {
             initializeTrackingCpu(frame_resized);
             return frame_resized;
         }
@@ -2629,33 +2770,41 @@ private:
         cv::Mat gray;
         cv::cvtColor(frame_resized, gray, cv::COLOR_BGR2GRAY);
 
+        std::vector<int> point_ids;
+        point_ids.reserve(tracked_points_.size());
+        for (const auto& kv : tracked_points_) {
+            point_ids.push_back(kv.first);
+        }
+
+        std::vector<cv::Point2f> p0;
+        p0.reserve(point_ids.size());
+        for (int id : point_ids) {
+            p0.push_back(tracked_points_[id]);
+        }
+
         std::vector<cv::Point2f> p1;
         std::vector<uchar> status;
         std::vector<float> err;
-        cv::calcOpticalFlowPyrLK(old_gray_, gray, points_, p1, status, err, cv::Size(15, 15), 2, lk_criteria_);
+        cv::calcOpticalFlowPyrLK(old_gray_, gray, p0, p1, status, err, cv::Size(15, 15), 2, lk_criteria_);
 
+        std::vector<int> good_ids;
         std::vector<cv::Point2f> good_new;
         std::vector<cv::Point2f> good_old;
-        std::vector<std::deque<cv::Point2f>> new_paths;
+        good_ids.reserve(point_ids.size());
+        good_new.reserve(point_ids.size());
+        good_old.reserve(point_ids.size());
 
-        good_new.reserve(points_.size());
-        good_old.reserve(points_.size());
-        new_paths.reserve(points_.size());
-
-        for (size_t i = 0; i < points_.size(); ++i) {
-            if (i < status.size() && status[i] == 1) {
+        for (size_t i = 0; i < point_ids.size(); ++i) {
+            if (i < status.size() && status[i] == 1 && i < p1.size()) {
+                good_ids.push_back(point_ids[i]);
                 good_new.push_back(p1[i]);
-                good_old.push_back(points_[i]);
+                good_old.push_back(p0[i]);
+            }
+        }
 
-                std::deque<cv::Point2f> path;
-                if (i < paths_.size()) {
-                    path = paths_[i];
-                }
-                path.push_back(p1[i]);
-                while (static_cast<int>(path.size()) > max_path_length_) {
-                    path.pop_front();
-                }
-                new_paths.push_back(std::move(path));
+        for (int id : point_ids) {
+            if (std::find(good_ids.begin(), good_ids.end(), id) == good_ids.end()) {
+                eraseTrackedPoint(id);
             }
         }
 
@@ -2663,19 +2812,142 @@ private:
             initializeTrackingCpu(frame_resized);
             return frame_resized;
         }
-        cv::Mat blended = renderClusteredFlow(frame_resized, good_new, good_old, new_paths);
+
+        std::vector<cv::Point2f> uvs(good_new.size());
+        for (size_t i = 0; i < good_new.size(); ++i) {
+            uvs[i] = (good_new[i] - good_old[i]) * static_cast<float>(fps_);
+        }
+
+        for (size_t i = 0; i < good_ids.size(); ++i) {
+            const int id = good_ids[i];
+            tracked_points_[id] = good_new[i];
+            auto& path = point_paths_[id];
+            path.push_back(good_new[i]);
+            while (static_cast<int>(path.size()) > max_path_length_) {
+                path.pop_front();
+            }
+        }
+
+        std::vector<int> valid_ids;
+        std::vector<int> invalid_ids;
+        valid_ids.reserve(good_ids.size());
+        invalid_ids.reserve(good_ids.size());
+
+        constexpr int min_frames_check = 5;
+        constexpr float inconsistency_threshold = 0.85F;
+        initializeDetectionMaskIfNeeded(gray.size());
+
+        for (size_t i = 0; i < good_ids.size(); ++i) {
+            const int id = good_ids[i];
+            bool is_valid = true;
+            auto it_path = point_paths_.find(id);
+            if (it_path != point_paths_.end() && static_cast<int>(it_path->second.size()) >= min_frames_check) {
+                const auto& path = it_path->second;
+                std::vector<cv::Point2f> recent_vels;
+                recent_vels.reserve(static_cast<size_t>(min_frames_check));
+
+                const int start = static_cast<int>(path.size()) - min_frames_check;
+                for (int j = start; j < static_cast<int>(path.size()) - 1; ++j) {
+                    recent_vels.push_back((path[j + 1] - path[j]) * static_cast<float>(fps_));
+                }
+
+                if (recent_vels.size() >= 2) {
+                    int invalid_transitions = 0;
+                    int total_transitions = 0;
+                    for (size_t j = 0; j + 1 < recent_vels.size(); ++j) {
+                        const cv::Point2f vel1 = recent_vels[j];
+                        const cv::Point2f vel2 = recent_vels[j + 1];
+                        const float mag1 = pointNorm(vel1);
+                        const float mag2 = pointNorm(vel2);
+                        if (mag1 > 2.0F && mag2 > 2.0F) {
+                            total_transitions += 1;
+                            const float dot = vel1.x * vel2.x + vel1.y * vel2.y;
+                            float cos_angle = dot / std::max(1e-6F, mag1 * mag2);
+                            cos_angle = std::clamp(cos_angle, -1.0F, 1.0F);
+                            const float angle = std::acos(cos_angle);
+                            if (angle > static_cast<float>(CV_PI) / 2.0F) {
+                                invalid_transitions += 1;
+                                continue;
+                            }
+                            const float mag_ratio = std::max(mag1, mag2) / (std::min(mag1, mag2) + 1e-6F);
+                            if (mag_ratio > 3.0F) {
+                                invalid_transitions += 1;
+                            }
+                        }
+                    }
+
+                    if (total_transitions > 0) {
+                        const float inconsistency = static_cast<float>(invalid_transitions) / static_cast<float>(total_transitions);
+                        if (inconsistency >= inconsistency_threshold) {
+                            is_valid = false;
+                        }
+                    }
+                }
+            }
+
+            if (is_valid) {
+                valid_ids.push_back(id);
+            } else {
+                invalid_ids.push_back(id);
+                const cv::Point2f pos = good_new[i];
+                cv::circle(detection_mask_, cv::Point(static_cast<int>(pos.x), static_cast<int>(pos.y)), invalid_region_radius_, cv::Scalar(0), cv::FILLED);
+            }
+        }
+
+        for (int id : invalid_ids) {
+            eraseTrackedPoint(id);
+        }
+
+        if (valid_ids.size() != good_ids.size()) {
+            std::vector<cv::Point2f> filtered_new;
+            std::vector<cv::Point2f> filtered_old;
+            std::vector<cv::Point2f> filtered_uvs;
+            filtered_new.reserve(valid_ids.size());
+            filtered_old.reserve(valid_ids.size());
+            filtered_uvs.reserve(valid_ids.size());
+
+            for (size_t i = 0; i < good_ids.size(); ++i) {
+                if (std::find(valid_ids.begin(), valid_ids.end(), good_ids[i]) != valid_ids.end()) {
+                    filtered_new.push_back(good_new[i]);
+                    filtered_old.push_back(good_old[i]);
+                    filtered_uvs.push_back(uvs[i]);
+                }
+            }
+            good_ids = std::move(valid_ids);
+            good_new = std::move(filtered_new);
+            good_old = std::move(filtered_old);
+            uvs = std::move(filtered_uvs);
+
+            if (good_new.empty()) {
+                initializeTrackingCpu(frame_resized);
+                return frame_resized;
+            }
+        }
+
+        detection_mask_.convertTo(detection_mask_, CV_16S);
+        detection_mask_ += mask_recovery_rate_;
+        cv::threshold(detection_mask_, detection_mask_, 255, 255, cv::THRESH_TRUNC);
+        detection_mask_.convertTo(detection_mask_, CV_8U);
+
+        cv::Mat blended = renderClusteredFlow(frame_resized, good_ids, good_new, uvs);
 
         old_gray_ = gray;
-        points_ = good_new;
-        paths_ = std::move(new_paths);
 
         if (frame_iter_ >= std::max(1, static_cast<int>(0.5 * fps_)) - 1) {
             std::vector<cv::Point2f> new_features;
-            cv::goodFeaturesToTrack(old_gray_, new_features, max_points_, 0.3, 7.0, cv::Mat(), 7, false, 0.04);
+            cv::Mat binary_mask = buildBinaryMask(detection_mask_);
+            cv::goodFeaturesToTrack(old_gray_, new_features, max_points_, 0.3, 7.0, binary_mask, 7, false, 0.04);
+
+            std::vector<cv::Point2f> tmp_points = good_new;
+            int available_slots = std::max(0, max_points_ - static_cast<int>(tracked_points_.size()));
 
             for (const auto& npt : new_features) {
+                if (available_slots <= 0) {
+                    break;
+                }
+
                 bool add = true;
-                for (const auto& ept : points_) {
+                for (const auto& ept : tmp_points) {
                     const cv::Point2f d = npt - ept;
                     if ((d.x * d.x + d.y * d.y) < 16.0F) {
                         add = false;
@@ -2683,8 +2955,9 @@ private:
                     }
                 }
                 if (add) {
-                    points_.push_back(npt);
-                    paths_.emplace_back();
+                    createTrackedPoint(npt);
+                    tmp_points.push_back(npt);
+                    available_slots -= 1;
                 }
             }
             frame_iter_ = -1;
@@ -2697,16 +2970,248 @@ private:
     void initializeTrackingCpu(const cv::Mat& frame_resized) {
         cv::cvtColor(frame_resized, old_gray_, cv::COLOR_BGR2GRAY);
 
-        points_.clear();
-        cv::goodFeaturesToTrack(old_gray_, points_, max_points_, 0.3, 7.0, cv::Mat(), 7, false, 0.04);
+        initializeDetectionMaskIfNeeded(old_gray_.size());
+        cv::Mat binary_mask = buildBinaryMask(detection_mask_);
 
-        paths_.clear();
-        paths_.resize(points_.size());
+        std::vector<cv::Point2f> points;
+        cv::goodFeaturesToTrack(old_gray_, points, max_points_, 0.3, 7.0, binary_mask, 7, false, 0.04);
+
+        tracked_points_.clear();
+        point_paths_.clear();
+        point_clusters_.clear();
+        for (const auto& p : points) {
+            createTrackedPoint(p);
+        }
 
         frame_iter_ = 0;
     }
 
     cv::Mat renderClusteredFlow(
+        const cv::Mat& frame_resized,
+        const std::vector<int>& point_ids,
+        const std::vector<cv::Point2f>& good_new,
+        const std::vector<cv::Point2f>& uvs
+    ) {
+        std::vector<cv::Point2f> path_vectors(good_new.size(), cv::Point2f(0.0F, 0.0F));
+        for (size_t i = 0; i < point_ids.size() && i < good_new.size(); ++i) {
+            const auto it = point_paths_.find(point_ids[i]);
+            if (it == point_paths_.end() || it->second.empty()) {
+                continue;
+            }
+            cv::Point2f sum(0.0F, 0.0F);
+            for (const auto& p : it->second) {
+                sum += p;
+            }
+            path_vectors[i] = sum * (1.0F / static_cast<float>(it->second.size()));
+        }
+
+        std::vector<int> labels(good_new.size(), 0);
+        cv::Mat centers;
+        cv::Mat membership;
+
+        if (static_cast<int>(good_new.size()) >= number_clusters_) {
+            cv::Mat data(static_cast<int>(good_new.size()), 6, CV_32F);
+            for (int i = 0; i < data.rows; ++i) {
+                data.at<float>(i, 0) = good_new[i].x;
+                data.at<float>(i, 1) = good_new[i].y;
+                data.at<float>(i, 2) = uvs[i].x;
+                data.at<float>(i, 3) = uvs[i].y;
+                data.at<float>(i, 4) = path_vectors[i].x;
+                data.at<float>(i, 5) = path_vectors[i].y;
+            }
+
+            cv::Mat init_u;
+            if (!previous_u_.empty() && previous_n_points_ == data.rows && previous_u_.rows == number_clusters_) {
+                init_u = previous_u_;
+            }
+
+            if (runFuzzyCMeans(data, number_clusters_, 2.0F, 0.005F, 50, init_u, centers, membership)) {
+                previous_u_ = membership.clone();
+                previous_n_points_ = data.rows;
+
+                std::vector<int> raw_membership(static_cast<size_t>(data.rows), 0);
+                std::vector<float> max_membership(static_cast<size_t>(data.rows), 0.0F);
+                for (int j = 0; j < data.rows; ++j) {
+                    int best_idx = 0;
+                    float best_val = membership.at<float>(0, j);
+                    for (int i = 1; i < membership.rows; ++i) {
+                        const float v = membership.at<float>(i, j);
+                        if (v > best_val) {
+                            best_val = v;
+                            best_idx = i;
+                        }
+                    }
+                    raw_membership[static_cast<size_t>(j)] = best_idx;
+                    max_membership[static_cast<size_t>(j)] = best_val;
+                }
+
+                std::vector<bool> outlier_mask(max_membership.size(), false);
+                constexpr float membership_threshold = 0.55F;
+                for (size_t i = 0; i < max_membership.size(); ++i) {
+                    outlier_mask[i] = max_membership[i] < membership_threshold;
+                }
+
+                if (!previous_centroids_.empty() && previous_centroids_.rows == number_clusters_) {
+                    cv::Mat distances(number_clusters_, previous_centroids_.rows, CV_32F, cv::Scalar(0));
+                    for (int i = 0; i < number_clusters_; ++i) {
+                        for (int j = 0; j < previous_centroids_.rows; ++j) {
+                            const cv::Vec<float, 6> cur(
+                                centers.at<float>(i, 0),
+                                centers.at<float>(i, 1),
+                                centers.at<float>(i, 2),
+                                centers.at<float>(i, 3),
+                                centers.at<float>(i, 4),
+                                centers.at<float>(i, 5)
+                            );
+                            const cv::Vec<float, 6> prv(
+                                previous_centroids_.at<float>(j, 0),
+                                previous_centroids_.at<float>(j, 1),
+                                previous_centroids_.at<float>(j, 2),
+                                previous_centroids_.at<float>(j, 3),
+                                previous_centroids_.at<float>(j, 4),
+                                previous_centroids_.at<float>(j, 5)
+                            );
+
+                            const float pos_dist = std::sqrt((cur[0] - prv[0]) * (cur[0] - prv[0]) + (cur[1] - prv[1]) * (cur[1] - prv[1]));
+                            const float vel_dist = std::sqrt((cur[2] - prv[2]) * (cur[2] - prv[2]) + (cur[3] - prv[3]) * (cur[3] - prv[3]));
+                            const float path_dist = std::sqrt((cur[4] - prv[4]) * (cur[4] - prv[4]) + (cur[5] - prv[5]) * (cur[5] - prv[5]));
+                            distances.at<float>(i, j) = 0.2F * pos_dist + 0.4F * vel_dist + 0.4F * path_dist;
+                        }
+                    }
+
+                    std::vector<int> new_mapping(static_cast<size_t>(number_clusters_), -1);
+                    std::vector<bool> used_prev(static_cast<size_t>(number_clusters_), false);
+
+                    struct PairDist { int curr; int prev; float dist; };
+                    std::vector<PairDist> pairs;
+                    pairs.reserve(static_cast<size_t>(number_clusters_ * number_clusters_));
+                    for (int i = 0; i < number_clusters_; ++i) {
+                        for (int j = 0; j < number_clusters_; ++j) {
+                            pairs.push_back({i, j, distances.at<float>(i, j)});
+                        }
+                    }
+                    std::sort(pairs.begin(), pairs.end(), [](const PairDist& a, const PairDist& b) {
+                        return a.dist < b.dist;
+                    });
+
+                    for (const auto& p : pairs) {
+                        if (new_mapping[static_cast<size_t>(p.curr)] >= 0 || used_prev[static_cast<size_t>(p.prev)]) {
+                            continue;
+                        }
+                        int mapped = p.prev;
+                        if (!cluster_id_mapping_.empty() && p.prev < static_cast<int>(cluster_id_mapping_.size())) {
+                            mapped = cluster_id_mapping_[static_cast<size_t>(p.prev)];
+                        }
+                        new_mapping[static_cast<size_t>(p.curr)] = mapped;
+                        used_prev[static_cast<size_t>(p.prev)] = true;
+                    }
+
+                    std::vector<bool> used_ids(static_cast<size_t>(number_clusters_), false);
+                    for (int mapped : new_mapping) {
+                        if (mapped >= 0 && mapped < number_clusters_) {
+                            used_ids[static_cast<size_t>(mapped)] = true;
+                        }
+                    }
+                    for (int i = 0; i < number_clusters_; ++i) {
+                        if (new_mapping[static_cast<size_t>(i)] >= 0) {
+                            continue;
+                        }
+                        int fallback = i;
+                        for (int cand = 0; cand < number_clusters_; ++cand) {
+                            if (!used_ids[static_cast<size_t>(cand)]) {
+                                fallback = cand;
+                                used_ids[static_cast<size_t>(cand)] = true;
+                                break;
+                            }
+                        }
+                        new_mapping[static_cast<size_t>(i)] = fallback;
+                    }
+                    cluster_id_mapping_ = std::move(new_mapping);
+                } else {
+                    cluster_id_mapping_.assign(static_cast<size_t>(number_clusters_), 0);
+                    for (int i = 0; i < number_clusters_; ++i) {
+                        cluster_id_mapping_[static_cast<size_t>(i)] = i;
+                    }
+                }
+
+                for (size_t i = 0; i < labels.size(); ++i) {
+                    if (outlier_mask[i]) {
+                        labels[i] = -1;
+                    } else {
+                        const int raw = raw_membership[i];
+                        labels[i] = (raw >= 0 && raw < static_cast<int>(cluster_id_mapping_.size())) ? cluster_id_mapping_[static_cast<size_t>(raw)] : raw;
+                    }
+                }
+
+                previous_centroids_ = centers.clone();
+            } else {
+                previous_u_.release();
+                previous_n_points_ = 0;
+            }
+        } else {
+            previous_u_.release();
+            previous_n_points_ = 0;
+        }
+
+        cv::Mat mask = cv::Mat::zeros(frame_resized.size(), frame_resized.type());
+        cv::Mat result = frame_resized.clone();
+
+        for (size_t i = 0; i < good_new.size(); ++i) {
+            const int cluster = (i < labels.size()) ? labels[i] : 0;
+            const cv::Scalar color = (cluster == -1)
+                ? cv::Scalar(128, 128, 128)
+                : colors_[static_cast<size_t>(cluster % static_cast<int>(colors_.size()))];
+            const cv::Point pt(static_cast<int>(good_new[i].x), static_cast<int>(good_new[i].y));
+
+            cv::circle(result, pt, 5, color, cv::FILLED);
+
+            if (i < point_ids.size()) {
+                point_clusters_[point_ids[i]] = cluster;
+            }
+
+            if (i < point_ids.size()) {
+                auto it = point_paths_.find(point_ids[i]);
+                if (it == point_paths_.end() || it->second.size() <= 1) {
+                    continue;
+                }
+                std::vector<cv::Point> poly;
+                poly.reserve(it->second.size());
+                for (const auto& p : it->second) {
+                    poly.emplace_back(static_cast<int>(p.x), static_cast<int>(p.y));
+                }
+                cv::polylines(mask, poly, false, color, 2);
+            }
+        }
+
+        for (int i = 0; i < centers.rows; ++i) {
+            const float cx = centers.at<float>(i, 0);
+            const float cy = centers.at<float>(i, 1);
+            const float vx = centers.at<float>(i, 2);
+            const float vy = centers.at<float>(i, 3);
+            const float vel = std::sqrt(vx * vx + vy * vy);
+
+            int mapped_id = i;
+            if (!cluster_id_mapping_.empty() && i < static_cast<int>(cluster_id_mapping_.size())) {
+                mapped_id = cluster_id_mapping_[static_cast<size_t>(i)];
+            }
+            const cv::Scalar color = colors_[static_cast<size_t>(mapped_id % static_cast<int>(colors_.size()))];
+
+            std::ostringstream ss;
+            ss << "V:" << std::fixed << std::setprecision(1) << vel;
+            cv::putText(result, ss.str(), cv::Point(static_cast<int>(cx) + 15, static_cast<int>(cy) - 15), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 2);
+            cv::putText(result, ss.str(), cv::Point(static_cast<int>(cx) + 15, static_cast<int>(cy) - 15), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+
+            const cv::Point center_pt(static_cast<int>(cx), static_cast<int>(cy));
+            const cv::Point end_pt(static_cast<int>(cx + vx * 0.1F), static_cast<int>(cy + vy * 0.1F));
+            cv::arrowedLine(result, center_pt, end_pt, color, 2, cv::LINE_AA, 0, 0.3);
+        }
+
+        cv::Mat blended;
+        cv::addWeighted(result, 1.0, mask, 0.5, 0.0, blended);
+        return blended;
+    }
+
+    cv::Mat renderClusteredFlowLegacy(
         const cv::Mat& frame_resized,
         const std::vector<cv::Point2f>& good_new,
         const std::vector<cv::Point2f>& good_old,
@@ -2986,7 +3491,7 @@ private:
             return frame_resized;
         }
 
-        cv::Mat blended = renderClusteredFlow(frame_resized, good_new, good_old, new_paths);
+        cv::Mat blended = renderClusteredFlowLegacy(frame_resized, good_new, good_old, new_paths);
         points_ = good_new;
         paths_ = std::move(new_paths);
         frame_iter_ += 1;
@@ -3058,6 +3563,18 @@ private:
     cv::TermCriteria lk_criteria_{cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 0.03};
 
     cv::Mat old_gray_;
+    int next_point_id_{0};
+    std::unordered_map<int, cv::Point2f> tracked_points_;
+    std::unordered_map<int, std::deque<cv::Point2f>> point_paths_;
+    std::unordered_map<int, int> point_clusters_;
+    cv::Mat detection_mask_;
+    int mask_recovery_rate_{2};
+    int invalid_region_radius_{20};
+    cv::Mat previous_centroids_;
+    std::vector<int> cluster_id_mapping_;
+    cv::Mat previous_u_;
+    int previous_n_points_{0};
+
     std::vector<cv::Point2f> points_;
     std::vector<std::deque<cv::Point2f>> paths_;
     int frame_iter_{0};
