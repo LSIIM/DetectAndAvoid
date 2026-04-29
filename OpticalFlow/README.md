@@ -1,49 +1,12 @@
 # Optical Flow Project
 
 ## Overview
-This project implements Optical Flow in both C++ and Python using OpenCV.
+This project implements Optical Flow in and Python using OpenCV.
 
 ## Features
 - Computes dense and sparse optical flow
 - Supports Lucas-Kanade and Farneback methods
-- C++ implementation with CUDA support
 - Python implementation with machine learning clustering
-
-## C++ Implementation
-
-### Dependencies
-- OpenCV
-- CMake
-- C++ compiler
-
-### Compilation
-To compile the C++ code, use the following commands:
-
-```bash
-mkdir build
-cd build
-cmake ..
-cmake .
-```
-
-### Execution
-To run the C++ optical flow implementation:
-
-```bash
-./opticalflow <clusters> [video_path]
-```
-
-### Command Line Arguments
-The C++ implementation accepts the following command line arguments:
-
-- `<clusters>` (required): Number of clusters for fuzzy c-means clustering
-- `[video_path]` (optional): Path to the input video file
-
-Example usage:
-```bash
-./opticalflow 5
-./opticalflow 3 path/to/video.mp4
-```
 
 ## Python Implementation - Optical Flow
 
