@@ -11,7 +11,7 @@ from modules.sky_seg_module import SkySegmentation
 
 # ============================= CONFIGURAÇÕES =============================
 # Caminhos
-VIDEO_PATH = r"Raw_Videos/droneVSdrone1.mp4"
+VIDEO_PATH = r"Raw_Videos/fev_corte_8.mp4"
 
 #YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.pt"
 #YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.engine"
@@ -25,7 +25,7 @@ USE_TENSORRT_SKYSEG = True
 TRACKER_CONFIG = "bytetrack.yaml"
 
 # Configurações de processamento
-YOLO_CONFIDENCE = 0.5
+YOLO_CONFIDENCE = 0.6
 PROCESSING_WIDTH = 640
 PROCESSING_HEIGHT = 640
 HORIZON_MODEL_INPUT_SIZE = (320, 320)
