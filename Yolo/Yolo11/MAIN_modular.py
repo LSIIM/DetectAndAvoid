@@ -14,7 +14,10 @@ from modules.sky_seg_module import SkySegmentation
 VIDEO_PATH = r"Raw_Videos/droneVSdrone1.mp4"
 
 #YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.pt"
-YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.engine"
+#YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.engine"
+
+#YOLO_MODEL_PATH = r"Weights/best_yolo26_maio2026_drone_bird_aircraft2.pt"
+YOLO_MODEL_PATH = r"Weights/best_yolo26_maio2026_drone_bird_aircraft2.engine"
 
 HORIZON_MODEL_PATH = "Weights/skyseg_fp16.onnx"
 USE_TENSORRT_SKYSEG = True
