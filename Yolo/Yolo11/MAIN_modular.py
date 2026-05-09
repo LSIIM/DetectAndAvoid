@@ -11,11 +11,12 @@ from modules.sky_seg_module import SkySegmentation
 
 # ============================= CONFIGURAÇÕES =============================
 # Caminhos
-VIDEO_PATH = r"videos_test\droneVSdrone1.mp4"
-YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.pt"
-#YOLO_MODEL_PATH = r"Weights\yolo_11_JUNHO_nano_drones_DGX.engine"
+VIDEO_PATH = r"Raw_Videos/droneVSdrone1.mp4"
 
-HORIZON_MODEL_PATH = "Weights\skyseg_fp16.onnx"
+#YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.pt"
+YOLO_MODEL_PATH = r"Weights/best_yolo_11_JUNHO_nano_drones_DGX.engine"
+
+HORIZON_MODEL_PATH = "Weights/skyseg_fp16.onnx"
 USE_TENSORRT_SKYSEG = True
 
 TRACKER_CONFIG = "bytetrack.yaml"
@@ -23,7 +24,7 @@ TRACKER_CONFIG = "bytetrack.yaml"
 # Configurações de processamento
 YOLO_CONFIDENCE = 0.5
 PROCESSING_WIDTH = 640
-PROCESSING_HEIGHT = 480
+PROCESSING_HEIGHT = 640
 HORIZON_MODEL_INPUT_SIZE = (320, 320)
 SEGMENTATION_UPDATE_INTERVAL = 30  # Atualiza segmentação a cada N frames
 
@@ -46,7 +47,7 @@ BINARY_THRESHOLD = 128  # Limiar para binarização da máscara
 # Configuração de saída
 input_dir, filename = os.path.split(VIDEO_PATH)
 name, ext = os.path.splitext(filename)
-OUTPUT_PATH = os.path.join(input_dir, f"{name}_unified_complete{ext}")
+OUTPUT_PATH = os.path.join(input_dir, f"{name}_final_processado{ext}")
 
 
 
