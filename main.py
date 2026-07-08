@@ -20,7 +20,7 @@ from Yolo.Yolo11.modules.yolo_module import YOLODetector
 from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
 from OpticalFlow import opticalflow as optical_flow
 
-YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/yolo_11_JUNHO_nano_drones_DGX.engine"
+YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
 
 
@@ -28,6 +28,7 @@ def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="DetectAndAvoid Integrated Processing")
     parser.add_argument("--video-ip", default="192.168.144.25", help="IP address for RTSP video stream")
+    parser.add_argument("--video-path", type=str, help="Video Path for processing")
     parser.add_argument("--clusters", type=int, default=5, help="Number of clusters for optical flow (default: 5)")
     parser.add_argument("--confidence", type=float, default=0.6, help="YOLO confidence threshold (default: 0.6)")
     parser.add_argument("--output", help="Output video path (optional)")
@@ -38,7 +39,7 @@ def parse_arguments():
 
     return parser.parse_args()
 
-def setup_video_capture(ip):
+def setup_video_capture_ip(ip):
     """Setup video capture and get properties"""
     url = f"rtsp://{ip}:8554/main.264"
 
@@ -52,6 +53,19 @@ def setup_video_capture(ip):
     cap = cv2.VideoCapture(gst_pipeline_lowlat, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file: {url}")
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    return cap, fps, frame_width, frame_height
+
+def setup_video_capture_path(path):
+    """Setup video capture and get properties"""
+
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {path}")
     
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -127,14 +141,20 @@ def main():
     args = parse_arguments()
     
     print("=== DetectAndAvoid Integration System ===")
-    print(f"Video IP: {args.video_ip}")
+    if not args.video_path:
+        print(f"Video IP: {args.video_ip}")
+    else:
+        print(f"Video Path: {args.video_path}")        
     print(f"Clusters: {args.clusters}")
     print(f"YOLO Confidence: {args.confidence}")
     print("==========================================")
     
     # Setup video capture
     try:
-        cap, fps, orig_width, orig_height = setup_video_capture(args.video_ip)
+        if not args.video_path:
+            cap, fps, orig_width, orig_height = setup_video_capture_ip(args.video_ip)
+        else:
+            cap, fps, orig_width, orig_height = setup_video_capture_path(args.video_path)
     except ValueError as e:
         print(f"Error: {e}")
         return 1
