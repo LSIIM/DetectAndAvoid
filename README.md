@@ -67,6 +67,7 @@ python main.py [flags]
 ### Argumentos
 
 - `--video-ip <ip>` (opcional): Endereço de IP da câmera (padrão:192.168.144.25) 
+- `--video-path <path>` (opcional): Caminho do vídeo a ser processado, ao invés da câmera 
 - `--clusters <num>` (opcional): Número de clusters para fluxo óptico (padrão: 5)
 - `--confidence <conf>` (opcional): Limiar de confiança do YOLO (padrão: 0.6)
 - `--output <caminho>` (opcional): Caminho do vídeo de saída
@@ -80,6 +81,9 @@ python main.py
 
 # Com parâmetros personalizados
 python main.py --video-ip 192.168.144.25 --clusters 3 --confidence 0.7
+
+# De vídeos gravados
+python main.py --video-path REC001.mp4
 
 # Salvar vídeo de saída
 python main.py --video-ip 192.168.144.25 --output processed_output.mp4
