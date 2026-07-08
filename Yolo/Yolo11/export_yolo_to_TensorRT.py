@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-model = YOLO(r'Weights/best_yolo26_maio2026_drone_bird_aircraft2.pt')
+model = YOLO(r'Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.pt')
 
 model.export(
     format='engine',
