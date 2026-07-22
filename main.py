@@ -245,14 +245,33 @@ def main():
             future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
             
             # Wait for all results (parallel execution happens here)
-            yolo_result, approach_detected = future_yolo.result()
-            sky_result, flight_status, sky_ratio = future_sky.result()
-            flow_result = future_flow.result()
+            yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
+            sky_result, sky_flight_status, sky_ratio = future_sky.result()
+            flow_new, flow_ids, flow_uvs = future_flow.result()
             
             frame_processing_time = time.time() - frame_start_time
             
             # Create combined display
-            combined_frame = np.hstack([yolo_result, sky_result, flow_result])
+            combined_frame = resized_frame.copy()
+
+            # sky_result in 50% alpha red in combined_frame
+            if sky_result is not None:
+                alpha = 0.5
+                combined_frame = cv2.addWeighted(combined_frame, 1 - alpha, sky_result, alpha, 0)
+
+            # Draw yolo_result detections on combined_frame
+            if yolo_result is not None:
+                combined_frame = yolo_detector.draw_detections(combined_frame, yolo_result, yolo_confidence, yolo_ids)
+
+            # Draw optical flow on combined_frame
+            for i, pid in enumerate(flow_ids) if flow_new is not None else []:
+                new = flow_new[i]
+                a, b = int(new[0]), int(new[1])
+                u, v = flow_uvs[i] * fps
+
+                # Draw arrow for optical flow
+                combined_frame = cv2.circle(combined_frame, (a, b), 5, flow_context.colors[0], -1)
+                combined_frame = cv2.arrowedLine(combined_frame, (a, b), (int(a + u), int(b + v)), flow_context.colors[1], 2, tipLength=0.2)
             
             # Add frame info with processing time
             info_text = f"Frame: {frame_count} | YOLO | Sky Seg | Optical Flow | {frame_processing_time*1000:.1f}ms"

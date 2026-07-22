@@ -108,7 +108,7 @@ class SkySegmentation:
             self.last_mask = cv.cvtColor(binary_mask, cv.COLOR_GRAY2BGR)
 
         display_frame = self.last_mask.copy()
-        self._draw_flight_status(display_frame)
+        #self._draw_flight_status(display_frame)
         
         return display_frame, self.last_flight_status, self.last_sky_ratio
     
@@ -219,3 +219,25 @@ class SkySegmentation:
         self.last_sky_ratio = 0.0
         self.last_roi_coords = (0, 0, 0, 0)
         self.last_status_color = (128, 128, 128)
+
+if __name__ == "__main__":
+    model_path = "models/sky_segmentation.onnx"
+    sky_seg = SkySegmentation(model_path=model_path, input_size=(320, 320), update_interval=30)
+
+    cap = cv.VideoCapture(0)  # Captura da webcam
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        display_frame, status, sky_ratio = sky_seg.process_frame(frame)
+
+        cv.imshow("Sky Segmentation", display_frame)
+        print(f"Status: {status}, Sky Ratio: {sky_ratio:.2%}")
+
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv.destroyAllWindows()

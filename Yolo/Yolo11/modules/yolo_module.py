@@ -134,22 +134,22 @@ class YOLODetector:
 
             self.global_max_area = max(self.global_max_area, current_frame_max_area)
 
-            self._draw_detections(frame_processed, boxes, confidences, ids)
+            #self._draw_detections(frame_processed, boxes, confidences, ids)
 
         if not has_detection:
             if self.last_detection_time > 0 and (now - self.last_detection_time) > self.no_det_reset_sec:
                 self.global_max_area = 0.0
 
-        self._draw_alert(frame_processed)
+        #self._draw_alert(frame_processed)
         
-        return frame_processed, approach_detected
+        return boxes, confidences, ids, approach_detected
     
     def _calculate_area(self, box):
         """Calcula a área de uma caixa delimitadora"""
         x1, y1, x2, y2 = box
         return abs((x2 - x1) * (y2 - y1))
     
-    def _draw_detections(self, frame, boxes, confidences, ids):
+    def draw_detections(self, frame, boxes, confidences, ids):
         """Desenha detecções e trilhas no frame"""
         for idx, (box, conf) in enumerate(zip(boxes, confidences)):
             tid = ids[idx] if idx < len(ids) else -1
@@ -202,3 +202,30 @@ class YOLODetector:
         self.track_colors.clear()
         self.global_max_area = 0.0
         self.last_approach_time = 0.0
+
+
+if __name__ == "__main__":
+    # Exemplo de uso do YOLODetector
+    model_path = "path/to/your/model.pt"  # Substitua pelo caminho do seu modelo
+    tracker_config = "bytetrack.yaml"  # Substitua pelo caminho do seu arquivo de configuração do tracker
+    confidence_threshold = 0.5
+
+    detector = YOLODetector(model_path, tracker_config, confidence_threshold)
+
+    cap = cv.VideoCapture(0)  # Captura da webcam
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        boxes, confidences, ids, approach_detected = detector.process_frame(frame)
+        detector.draw_detections(frame, boxes, confidences, ids)
+
+        cv.imshow("YOLO Detection", frame)
+
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv.destroyAllWindows()
