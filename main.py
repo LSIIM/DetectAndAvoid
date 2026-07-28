@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from Yolo.Yolo11.modules.yolo_module import YOLODetector
 from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
-from OpticalFlow import opticalflow_old as optical_flow
+from OpticalFlow import opticalflow as optical_flow
 
 YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
@@ -170,6 +170,8 @@ def main():
     
     # Setup video writer
     writer = setup_video_writer(args.output, fps, processing_width * 3, processing_height)
+    red_overlay = np.full_like(np.zeros((processing_height, processing_width, 3), dtype=np.uint8), (0, 0, 127))
+
     
     # Setup modules
     print("\n--- Setting up modules ---")
@@ -178,9 +180,7 @@ def main():
         # Optical Flow setup
         print("Setting up Optical Flow...")
         flow_context = optical_flow.setup(
-            clusters=args.clusters, 
-            fps=fps,
-            processing_size=(processing_width, processing_height)
+            max_point=40
         )
         print("Setting up YOLO detector...")
         yolo_detector = YOLODetector(
@@ -257,22 +257,32 @@ def main():
             # sky_result in 50% alpha red in combined_frame
             if sky_result is not None:
                 alpha = 0.5
-                combined_frame = cv2.addWeighted(combined_frame, 1 - alpha, sky_result, alpha, 0)
+                colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
+                combined_frame[sky_result == 255] = colored_region[sky_result == 255]
 
             # Draw yolo_result detections on combined_frame
             if yolo_result is not None:
                 combined_frame = yolo_detector.draw_detections(combined_frame, yolo_result, yolo_confidence, yolo_ids)
 
             # Draw optical flow on combined_frame
+            vetor = [0,0]
             for i, pid in enumerate(flow_ids) if flow_new is not None else []:
                 new = flow_new[i]
+                vetor += flow_uvs[i]
                 a, b = int(new[0]), int(new[1])
                 u, v = flow_uvs[i] * fps
 
                 # Draw arrow for optical flow
                 combined_frame = cv2.circle(combined_frame, (a, b), 5, flow_context.colors[0], -1)
                 combined_frame = cv2.arrowedLine(combined_frame, (a, b), (int(a + u), int(b + v)), flow_context.colors[1], 2, tipLength=0.2)
-            
+
+            if  flow_new is not None:
+                vetor/len(flow_ids)
+                vetor * fps
+
+            combined_frame = cv2.circle(combined_frame, (int(processing_width/2), int(processing_height/2)), 8, (40,40,40), -1)
+            combined_frame = cv2.arrowedLine(combined_frame, (int(processing_width/2), int(processing_height/2)), (int(processing_width/2 + vetor[0]), int(processing_height/2 + vetor[1])), (80,120,80), 3, tipLength=0.2)
+
             # Add frame info with processing time
             info_text = f"Frame: {frame_count} | YOLO | Sky Seg | Optical Flow | {frame_processing_time*1000:.1f}ms"
             cv2.putText(combined_frame, info_text, (10, 30), 

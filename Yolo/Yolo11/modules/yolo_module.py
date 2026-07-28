@@ -174,6 +174,7 @@ class YOLODetector:
             pts = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
             if len(pts) > 1:
                 cv.polylines(frame, [pts], False, self.track_colors[tid], 2)
+        return frame
     
     def _draw_alert(self, frame):
         """Desenha alerta de aproximação se necessário"""
