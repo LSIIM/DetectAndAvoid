@@ -34,8 +34,8 @@ class OpticalFlowContext:
         self.number_clusters = 5
         self.fps = 30
         self.processing_size = (640, 480)
-        self.max_point = 30
-        self.max_path_length = 20
+        self.max_point = 200
+        self.max_path_length = 60
         self.debug = False
         
         # Feature detection parameters
@@ -79,7 +79,7 @@ class OpticalFlowContext:
 def generate_random_colors(n_colors):
     """Generate n_colors random colors with good visibility"""
     colors = []
-    random.seed(42)  
+    random.seed(24)  
     for i in range(n_colors):
         r = random.uniform(0, 255)
         g = random.uniform(0, 255)
@@ -116,9 +116,18 @@ def initialize_tracking(frame, context):
     
     # Create binary mask for goodFeaturesToTrack (only 0 and 255)
     binary_mask = (context.detection_mask > 200).astype(np.uint8) * 255
+    ksize = 3
+    n_prewitt = 3
+    degree = 1
+    delta = 0
+
+    sobel = cv2.Sobel(context.old_gray, cv2.CV_8UC1, degree,degree, ksize=ksize,delta=delta)
+    prewitt = cv2.filter2D(context.old_gray, -2, np.array([[n_prewitt, 0, -n_prewitt], [n_prewitt, 0, -n_prewitt], [n_prewitt, 0, -n_prewitt]]))
+    merge_3ch = cv2.merge([context.old_gray, sobel, prewitt])
+    merge_gray = cv2.cvtColor(merge_3ch, cv2.COLOR_BGR2GRAY)
     
     # Find initial features
-    context.p0 = cv2.goodFeaturesToTrack(context.old_gray, mask=binary_mask, **context.feature_params)
+    context.p0 = cv2.goodFeaturesToTrack(merge_gray, mask=binary_mask, **context.feature_params)
     
     if context.p0 is None:
         return False
@@ -197,14 +206,24 @@ def process_frame(frame, context):
     
     # Calculate velocities
     uvs = (good_new - good_old) * context.fps
-    
+
+    # Calulate mean uv for debugging
+    mean_uv = np.mean(uvs, axis=0) if len(uvs) > 0 else np.array([0, 0])
+    uv_window = np.zeros((400, 400, 3), dtype=np.uint8)
+    # draw mean velocity vector
+    center = (200, 200)
+    end_point = (int(center[0] + mean_uv[0]), int(center[1] + mean_uv[1]))
+    cv2.arrowedLine(uv_window, center, end_point, (0, 255, 0), 2)
+    cv2.circle(uv_window, center, 3, (0, 0, 255), -1)
+    cv2.imshow("Mean Velocity Vector", uv_window)
+
     # Update paths and positions for each tracked point
     for i, pid in enumerate(good_ids):
         # Update position
         context.tracked_points[pid].position = good_new[i]
         
         # Update path
-        context.point_paths[pid].append(good_new[i])
+        context.point_paths[pid].append(uvs[i])
         # Keep only recent path history
         if len(context.point_paths[pid]) > context.max_path_length:
             context.point_paths[pid] = context.point_paths[pid][-context.max_path_length:]
@@ -212,8 +231,8 @@ def process_frame(frame, context):
     # Verify tracking consistency - remove points with erratic movement
     valid_ids = []
     invalid_ids = []
-    min_frames_check = 5  # Number of frames to analyze
-    inconsistency_threshold = 0.85  # 50% of transitions must be bad to invalidate
+    min_frames_check = 10  # Number of frames to analyze
+    inconsistency_threshold = 0.50  # 50% of transitions must be bad to invalidate
     
     for i, pid in enumerate(good_ids):
         is_valid = True
@@ -254,7 +273,14 @@ def process_frame(frame, context):
                     cos_angle = dot_product / (mag1 * mag2)
                     cos_angle = np.clip(cos_angle, -1.0, 1.0)
                     angle_diff = np.arccos(cos_angle)
-                    
+
+                    #Take into account the mean_uv direction
+                    mean_uv_dot = np.dot(vel1, mean_uv)
+                    mean_uv_mag = np.linalg.norm(mean_uv)
+                    if mean_uv_mag > 0:
+                        mean_uv_angle = np.arccos(np.clip(mean_uv_dot / (mag1 * mean_uv_mag), -1.0, 1.0))
+                        angle_diff += mean_uv_angle
+
                     # Check for sudden direction change (> 90 degrees)
                     if angle_diff > np.pi / 2:
                         invalid_transitions += 1
@@ -325,7 +351,15 @@ def process_frame(frame, context):
         # Prepare data for clustering (x, y coordinates + current velocity + path average)
         # Stack: [x_positions, y_positions, velocity_x, velocity_y, path_avg_x, path_avg_y]
         alldata = np.vstack((good_new[:, 0], good_new[:, 1], uvs[:, 0], uvs[:, 1], path_vectors[:, 0], path_vectors[:, 1]))
-        
+
+        #normalize different components to avoid scale issues
+        alldata[0] = (alldata[0] - np.min(alldata[0])) / (np.max(alldata[0]) - np.min(alldata[0]) + 1e-6)
+        alldata[1] = (alldata[1] - np.min(alldata[1])) / (np.max(alldata[1]) - np.min(alldata[1]) + 1e-6)
+        alldata[2] = (alldata[2] - np.min(alldata[2])) / (np.max(alldata[2]) - np.min(alldata[2]) + 1e-6)
+        alldata[3] = (alldata[3] - np.min(alldata[3])) / (np.max(alldata[3]) - np.min(alldata[3]) + 1e-6)
+        alldata[4] = (alldata[4] - np.min(alldata[4])) / (np.max(alldata[4]) - np.min(alldata[4]) + 1e-6)
+        alldata[5] = (alldata[5] - np.min(alldata[5])) / (np.max(alldata[5]) - np.min(alldata[5]) + 1e-6)
+
         try:
             # Perform fuzzy c-means clustering with 50 iterations
             # Use previous membership matrix for warm start if available and point count matches
@@ -342,7 +376,7 @@ def process_frame(frame, context):
             raw_membership = np.argmax(u, axis=0)
             
             # Detect outliers based on fuzzy membership strength
-            membership_threshold = 0.55  # Minimum membership value to belong to a cluster
+            membership_threshold = 0.33  # Minimum membership value to belong to a cluster
             max_memberships = np.max(u, axis=0)  # Maximum membership value for each point
             
             # Mark points with low membership as outliers (-1)
@@ -359,7 +393,7 @@ def process_frame(frame, context):
                         vel_dist = np.linalg.norm(curr_center[2:4] - prev_center[2:4])
                         path_dist = np.linalg.norm(curr_center[4:6] - prev_center[4:6])
                         # Combined distance with weights
-                        distances[i, j] = 0.2 * pos_dist + 0.4 * vel_dist + 0.4 * path_dist
+                        distances[i, j] = 0.4 * pos_dist + 0.2 * vel_dist + 0.4 * path_dist
                 
                 # Create mapping using greedy approach
                 used_prev_ids = set()
@@ -406,7 +440,51 @@ def process_frame(frame, context):
             # Store cluster membership by ID (-1 for outliers)
             for i, pid in enumerate(good_ids):
                 context.point_clusters[pid] = cluster_membership[i]
+
+            #draw cluster and points on path vector space
+            pathSpace = np.zeros((800, 1000, 3), dtype=np.uint8)
+            for i, pid in enumerate(good_ids):
+                if context.point_clusters[pid] != -1:
+                    color = context.colors[context.point_clusters[pid] % len(context.colors)]
+                else:
+                    color = (128, 128, 128)  # Gray for outliers
+                pos = path_vectors[i].astype(int) * 5
+                cv2.circle(pathSpace,(int(pos[0] + 500), int(pos[1] + 400)), 5, color, -1)
             
+            #clusters
+            for i, centroid in enumerate(cntr):
+                if i < len(context.colors):
+                    mapped_id = context.cluster_id_mapping.get(i, i) if context.cluster_id_mapping else i
+                    color = context.colors[mapped_id % len(context.colors)]
+                    unnormalized_centroid = centroid[4:6] * (np.max(path_vectors, axis=0) - np.min(path_vectors, axis=0) + 1e-6) + np.min(path_vectors, axis=0)
+
+                    center_pos = (int(unnormalized_centroid[0]*5 + 500), int(unnormalized_centroid[1]*5 + 400))
+                    cv2.circle(pathSpace, center_pos, 8, color, -1)
+                    cv2.circle(pathSpace, center_pos, 8, (50, 50, 50), 1)  # Black border for visibility
+            cv2.imshow("Path Vector Space", pathSpace)
+
+            #draw cluster and points on velocity space
+            velSpace = np.zeros((800, 1000, 3), dtype=np.uint8)
+            for i, pid in enumerate(good_ids):
+                if context.point_clusters[pid] != -1:
+                    color = context.colors[context.point_clusters[pid] % len(context.colors)]
+                else:
+                    color = (128, 128, 128)  # Gray for outliers
+                pos = uvs[i].astype(int) * 5
+                cv2.circle(velSpace,(int(pos[0] + 500), int(pos[1] + 400)), 5, color, -1)
+            #clusters
+            for i, centroid in enumerate(cntr):
+                if i < len(context.colors):
+                    mapped_id = context.cluster_id_mapping.get(i, i) if context.cluster_id_mapping else i
+                    color = context.colors[mapped_id % len(context.colors)]
+                    unnormalized_centroid = centroid[2:4] * (np.max(uvs, axis=0) - np.min(uvs, axis=0) + 1e-6) + np.min(uvs, axis=0)
+
+                    center_pos = (int(unnormalized_centroid[0]*5 + 500), int(unnormalized_centroid[1]*5 + 400))
+                    cv2.circle(velSpace, center_pos, 8, color, -1)
+                    cv2.circle(velSpace, center_pos, 8, (50, 50, 50), 1)  # Black border for visibility
+
+            cv2.imshow("Velocity Space", velSpace)
+
         except:
             # Fallback if clustering fails
             cluster_membership = [0] * len(good_new)
@@ -463,18 +541,18 @@ def process_frame(frame, context):
                 center_pos = (int(centroid[0]), int(centroid[1]))
                 
                 # Display velocity magnitude
-                vel_magnitude = np.sqrt(centroid[2]**2 + centroid[3]**2)
-                vel_text = f"V:{vel_magnitude:.1f}"
+                # vel_magnitude = np.sqrt(centroid[2]**2 + centroid[3]**2)
+                # vel_text = f"V:{vel_magnitude:.1f}"
                 
                 # Display current velocity
-                cv2.putText(result_frame, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                cv2.putText(result_frame, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                # cv2.putText(result_frame, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                # cv2.putText(result_frame, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                        #    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                 # Draw centroid circle
                 # cv2.circle(result_frame, center_pos, 8, color, -1)
                 # Draw velocity vector
-                end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
+                # end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
                 # cv2.arrowedLine(result_frame, center_pos, end_pos, color, 2, tipLength=0.3)
 
     # Combine frame with mask
@@ -497,15 +575,26 @@ def process_frame(frame, context):
     context.p0 = good_new.reshape(-1, 1, 2)
 
     # Reprocess good features after certain number of frames
-    if context.frame_iter >= int(0.5 * context.fps) - 1:
+    if context.frame_iter >= int(0.5 * context.fps) - 1 and len(good_new) < context.max_point:
         # Get current good points as starting point
         tmp_p = good_new.copy()
         
         # Create binary mask for goodFeaturesToTrack (only 0 and 255)
         binary_mask = (context.detection_mask > 127).astype(np.uint8) * 255
+        ksize = 3
+        n_prewitt = 3
+        degree = 1
+        delta = 0
+
+        context.feature_params['maxCorners'] = context.max_point - len(good_new)
+        
+        sobel = cv2.Sobel(context.old_gray, cv2.CV_8UC1, degree,degree, ksize=ksize,delta=delta)
+        prewitt = cv2.filter2D(context.old_gray, -2, np.array([[n_prewitt, 0, -n_prewitt], [n_prewitt, 0, -n_prewitt], [n_prewitt, 0, -n_prewitt]]))
+        merge_3ch = cv2.merge([context.old_gray, sobel, prewitt])
+        merge_gray = cv2.cvtColor(merge_3ch, cv2.COLOR_BGR2GRAY)
         
         # Find new feature points using detection mask
-        new_features = cv2.goodFeaturesToTrack(context.old_gray, mask=binary_mask, **context.feature_params)
+        new_features = cv2.goodFeaturesToTrack(merge_gray, mask=binary_mask, **context.feature_params)
         
         if new_features is not None:
             new_features = new_features.reshape(-1, 2)
@@ -527,6 +616,17 @@ def process_frame(frame, context):
                     context.point_clusters[tracked_pt.id] = 0
                     # Add to p0 for next iteration
                     tmp_p = np.vstack([tmp_p, new_pt]) if len(tmp_p) > 0 else new_pt.reshape(-1, 2)
+                    # assign closest cluster to new point and add path = to the closest cluster
+                    closest_cluster = 0
+                    min_distance = float('inf')
+                    for cluster_id, centroid in enumerate(context.previous_centroids if context.previous_centroids is not None else []):
+                        distance = np.sqrt((new_pt[0] - centroid[0])**2 + (new_pt[1] - centroid[1])**2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_cluster = cluster_id
+                            context.point_paths[tracked_pt.id] = [centroid[:2]]  # Initialize path with centroid position
+                    context.point_clusters[tracked_pt.id] = closest_cluster
+
             
             # Update p0 for next iteration
             context.p0 = tmp_p.reshape(-1, 1, 2)
@@ -600,17 +700,6 @@ if __name__ == "__main__":
     #frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     merge_3ch = cv2.merge([prewitt, sobel, canny])
 
-    cv2.imshow("Optical Flow", frame)
-    cv2.imshow("Gray", gray)
-    cv2.imshow("Sobel", sobel)
-    cv2.imshow("Canny", canny)
-    cv2.imshow("Prewitt", prewitt)
-    cv2.imshow("Merge 3 Channels", merge_3ch)
-    k = cv2.waitKey(0)
-
-    #video output em avi format
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter('canny_out.avi', fourcc, fps, context.processing_size)
 
     while True:
         ret, frame = capture.read()
@@ -624,13 +713,13 @@ if __name__ == "__main__":
         merge_3ch = cv2.merge([gray, sobel, prewitt])
         
         # Process frame
-        result = process_frame(merge_3ch, context)
-        out.write(result)  # Write frame to output video
+        result = process_frame(frame, context)
 
         # Display result
         cv2.imshow("Optical Flow", result)
 
         debug = np.ones(result.shape, dtype=np.uint8) * 255
+        roi_list = []
         
         # Group points by cluster (excluding outliers)
         cluster_points = {}
@@ -669,31 +758,34 @@ if __name__ == "__main__":
                         
                         # Draw line connecting centroid to ROI center
                         roi_center = (x_min + roi.shape[1]//2, y_min + roi.shape[0]//2)
+
+                        roi_list.append([x_min, y_min, x_max, y_max])
                 
                 # Draw centroid position
                 center_pos = (int(centroid[0]), int(centroid[1]))
                 
-                # Display velocity magnitude
-                vel_magnitude = np.sqrt(centroid[2]**2 + centroid[3]**2)
-                vel_text = f"V:{vel_magnitude:.1f}"
+                # # Display velocity magnitude
+                # vel_magnitude = np.sqrt(centroid[2]**2 + centroid[3]**2)
+                # vel_text = f"V:{vel_magnitude:.1f}"
                 
                 # Display current velocity
-                cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                # cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                # cv2.putText(debug, vel_text, (center_pos[0] + 15, center_pos[1] - 15), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                 # Draw centroid circle
-                cv2.circle(debug, center_pos, 8, color, -1)
+                #cv2.circle(debug, center_pos, 8, color, -1)
                 # Draw velocity vector
-                end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
-                cv2.arrowedLine(debug, center_pos, end_pos, color, 2, tipLength=0.3)
+                # end_pos = (int(centroid[0] + centroid[2] * 0.1), int(centroid[1] + centroid[3] * 0.1))
+                # cv2.arrowedLine(debug, center_pos, end_pos, color, 2, tipLength=0.3)
 
         cv2.imshow("Debug Mask", debug)
+        print("ROI List:", roi_list)
         # Display detection mask
         if context.detection_mask is not None:
             cv2.imshow("Detection Mask", context.detection_mask)
         
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(0) & 0xFF
         if key == 27 or key == ord('q'):  # ESC or 'q'
             break
         elif key == ord('+') or key == ord('='):  # Increase clusters
@@ -715,7 +807,6 @@ if __name__ == "__main__":
                 context.previous_n_points = 0
                 print(f"Clusters decreased to: {context.number_clusters}")
 
-    out.release()
     # Cleanup
     capture.release()
     cv2.destroyAllWindows()
