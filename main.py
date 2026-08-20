@@ -169,7 +169,7 @@ def main():
     print(f"FPS: {fps}")
     
     # Setup video writer
-    writer = setup_video_writer(args.output, fps, processing_width * 3, processing_height)
+    writer = setup_video_writer(args.output, fps, processing_width, processing_height)
     red_overlay = np.full_like(np.zeros((processing_height, processing_width, 3), dtype=np.uint8), (0, 0, 127))
 
     
