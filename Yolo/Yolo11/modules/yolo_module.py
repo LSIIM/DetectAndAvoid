@@ -38,14 +38,15 @@ class YOLODetector:
         
         try:
             _, ext = os.path.splitext(model_path)
-            
+
             if ext.lower() == '.engine':
-                if self.device == "cpu":
+            
+            if self.device == "cpu":
                     raise RuntimeError(
                         "Modelo TensorRT (.engine) requer CUDA; use um modelo .pt para CPU"
                     )
-                self.model = self._load_engine(model_path)
-                print("✓ Modelo YOLO TensorRT carregado (.engine)")
+                self.model = YOLO(model_path, task="detect")
+                print("✓ Modelo YOLO TensorRT carregado (.engine, task=detect)")
             elif ext.lower() == '.pt':
                 self.model = YOLO(model_path).to(self.device)
                 print(f"✓ Modelo YOLO PyTorch carregado em {self.device} (.pt)")
@@ -74,18 +75,6 @@ class YOLODetector:
         self.alert_box_color = alert_box_color
         self.alert_font_scale = alert_font_scale
         self.alert_thickness = alert_thickness
-    
-    def _load_engine(self, model_path: str) -> YOLO:
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        for task in ("segment","detect"):
-            try:
-                model = YOLO(model_path, task=task)
-                model(dummy, verbose=False)
-                print(f"  task inferida: {task}")
-                return model
-            except (IndexError, Exception):
-                continue
-        raise RuntimeError(f"Não foi possível inferir task para: {model_path}")
 
     def process_frame(self, frame):
         """
@@ -97,13 +86,11 @@ class YOLODetector:
         Returns:
             tuple: (frame_processado, approach_detected)
         """
-        frame_processed = frame.copy()
-        
         results = self.model.track(
-            frame_processed, 
-            persist=True, 
+            frame,
+            persist=True,
             tracker=self.tracker_config,
-            verbose=False, 
+            verbose=False,
             conf=self.confidence_threshold
         )
         
