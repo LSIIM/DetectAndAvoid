@@ -2,7 +2,7 @@
 """
 DetectAndAvoid - Main Integration Module
 
-This module integrates YOLO detection, MiDaS depth, and Optical Flow
+This module integrates YOLO detection, ZipDepth, and Optical Flow
 processing into a unified video processing pipeline.
 
 Usage:
@@ -18,12 +18,12 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from Yolo.Yolo11.modules.yolo_module import YOLODetector
 # from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
-from midas_depth.midas_module import MiDaSDepth
+from zip_depth.zip_depth_module import ZipDepth
 from OpticalFlow import opticalflow as optical_flow
 
 YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 # HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
-MIDAS_ENGINE_PATH = r"midas_depth/midas_small.engine"
+ZIPDEPTH_ENGINE_PATH = r"zip_depth/zipdepth_base_384x384_fp16.trt"
 
 
 def parse_arguments():
@@ -38,7 +38,7 @@ def parse_arguments():
     parser.add_argument("--yolo-model-path", type=str, default=YOLO_MODEL_PATH, help="Path to YOLO model weights")
     # parser.add_argument("--horizon-model-path", type=str, default=HORIZON_MODEL_PATH, help="Path to Horizon model weights")
     # parser.add_argument("--segmentation-update-interval", type=int, default=30, help="Segmentation update interval (default: 30)")
-    parser.add_argument("--depth-model-path", type=str, default=MIDAS_ENGINE_PATH, help="Path to MiDaS TensorRT engine")
+    parser.add_argument("--depth-model-path", type=str, default=ZIPDEPTH_ENGINE_PATH, help="Path to ZipDepth TensorRT engine")
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
     parser.add_argument("--no-hw-decode", action="store_true", help="Force OpenCV software decode (no nvvidconv scale)")
 
@@ -151,12 +151,12 @@ def process_yolo_threaded(frame, yolo_detector):
 #         print(f"Error in Sky Segmentation processing: {e}")
 #         return frame, "UNKNOWN", 0.0
 
-def process_depth_threaded(frame, midas_depth):
-    """Process MiDaS depth in a separate thread"""
+def process_depth_threaded(frame, zip_depth):
+    """Process ZipDepth in a separate thread"""
     try:
-        return midas_depth.process_frame(frame)
+        return zip_depth.process_frame(frame)
     except Exception as e:
-        print(f"Error in MiDaS depth processing: {e}")
+        print(f"Error in ZipDepth processing: {e}")
         return np.zeros_like(frame)
 
 def process_flow_threaded(frame, flow_context):
@@ -227,7 +227,7 @@ def main():
     print(f"Display: {'off' if args.no_display else 'on'}")
     print(f"FPS: {fps}")
     
-    # Setup video writer (side-by-side: depth | YOLO+flow)
+    # Setup video writer (side-by-side: YOLO+flow | ZipDepth)
     writer = setup_video_writer(args.output, fps, processing_width * 2, processing_height)
     # red_overlay = np.full_like(np.zeros((processing_height, processing_width, 3), dtype=np.uint8), (0, 0, 127))
 
@@ -255,8 +255,8 @@ def main():
             alert_font_scale=ALERT_FONT_SCALE,
             alert_thickness=ALERT_THICKNESS
         )
-        print("Setting up MiDaS depth...")
-        midas_depth = MiDaSDepth(
+        print("Setting up ZipDepth...")
+        zip_depth = ZipDepth(
             model_path=args.depth_model_path
         )
         # print("Setting up Sky Segmentation...")
@@ -308,7 +308,7 @@ def main():
             # Shared buffer: workers do not write the color frame
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
             # future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
-            future_depth = executor.submit(process_depth_threaded, resized_frame, midas_depth)
+            future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
             
             # Wait for all results (parallel execution happens here)
@@ -352,20 +352,20 @@ def main():
             combined_frame = cv2.arrowedLine(combined_frame, (int(processing_width/2), int(processing_height/2)), (int(processing_width/2 + vetor[0]), int(processing_height/2 + vetor[1])), (80,120,80), 3, tipLength=0.2)
 
             # Add frame info with processing time
-            info_text = f"Frame: {frame_count} | YOLO | MiDaS | Optical Flow | {frame_processing_time*1000:.1f}ms"
+            info_text = f"Frame: {frame_count} | YOLO | ZipDepth | Optical Flow | {frame_processing_time*1000:.1f}ms"
             cv2.putText(combined_frame, info_text, (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(combined_frame, info_text, (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
             
-            display = np.hstack([depth_color, combined_frame])
+            display = np.hstack([combined_frame, depth_color])
 
             # Write frame if output is specified
             if writer:
                 writer.write(display)
             
             if not args.no_display:
-                cv2.imshow("DetectAndAvoid - MiDaS | YOLO | Optical Flow", display)
+                cv2.imshow("DetectAndAvoid - YOLO | Optical Flow | ZipDepth", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27 or key == ord('q'):
                     break
