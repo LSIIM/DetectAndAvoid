@@ -160,12 +160,11 @@ def process_depth_threaded(frame, zip_depth):
         return np.zeros_like(frame)
 
 def process_flow_threaded(frame, flow_context):
-    """Process optical flow in a separate thread"""
     try:
-        return optical_flow.process_frame(frame, flow_context)
+        return optical_flow.process_frame(frame, flow_context)  
     except Exception as e:
         print(f"Error in Optical Flow processing: {e}")
-        return frame
+        return frame, False   
 
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
@@ -315,7 +314,7 @@ def main():
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
             # sky_result, sky_flight_status, sky_ratio = future_sky.result()
             depth_color = future_depth.result()
-            flow_new, flow_ids, flow_uvs = future_flow.result()
+            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             
             frame_processing_time = time.time() - frame_start_time
             
