@@ -32,8 +32,9 @@ class YOLODetector:
             alert_thickness: Espessura do texto do alerta
         """
         
-        if not torch.cuda.is_available():
-            raise RuntimeError("GPU CUDA não disponível para YOLO")
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if self.device == "cpu":
+            print("CUDA não disponível; executando YOLO .pt na CPU")
         
         try:
             _, ext = os.path.splitext(model_path)
@@ -42,8 +43,8 @@ class YOLODetector:
                 self.model = YOLO(model_path, task="detect")
                 print("✓ Modelo YOLO TensorRT carregado (.engine, task=detect)")
             elif ext.lower() == '.pt':
-                self.model = YOLO(model_path).to("cuda")
-                print("✓ Modelo YOLO PyTorch carregado na GPU (.pt)")
+                self.model = YOLO(model_path).to(self.device)
+                print(f"✓ Modelo YOLO PyTorch carregado em {self.device} (.pt)")
             else:
                 raise ValueError(f"Formato não suportado: {ext}")
                 
