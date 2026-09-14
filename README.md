@@ -51,6 +51,22 @@ pip install numpy==1.23.5
 pip install -r requirements.txt
 ```
 
+## 4) Instalar OpenCV compilado com CUDA (se não estiver)
+É possível verificar a versão da biblioteca e a existência do CUDA com o comando:
+
+```bash
+python -c "import cv2; print(cv2.__version__)"
+```
+```bash
+python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
+```
+
+Para instalar rode o script. Esse processo deve levar vários minutos.
+```bash
+chmod +x install_opencv_cuda.sh
+./install_opencv_cuda.sh
+```
+
 
 ### 4) Gerar .engine
 Arquivo otimizado do modelo YOLO para GPU.
