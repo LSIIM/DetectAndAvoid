@@ -105,6 +105,8 @@ class OpticalFlowGPUContext:
         self.detection_mask_gpu = None
         self.mask_recovery_rate = 1  # Value added per frame to recover regions
         self.invalid_region_radius = 20  # Radius around invalid points to block
+        self._times_lk = []
+        self._times_rest = []
 
         
         # GPU streams for async operations
@@ -211,15 +213,23 @@ def initialize_tracking(frame, context):
 
 def process_frame(frame, context):
     """Process a single frame with GPU-accelerated optical flow"""
+    t_start = time.time()
+    lk_dt = 0.0
+
+    def _finish_rest():
+        context._times_rest.append(time.time() - t_start - lk_dt)
 
     if frame is None:
+        _finish_rest()
         return None, None, None, None
 
     # Initialize from the host frame. Passing a GpuMat here would make
     # initialize_tracking call upload() on an object that is already on the GPU.
     if context.p0 is None or context.old_gray is None:
         if not initialize_tracking(frame, context):
+            _finish_rest()
             return None, None, None, None
+        _finish_rest()
         return None, None, None, None
 
     # Reprocess good features after certain number of frames
@@ -301,6 +311,7 @@ def process_frame(frame, context):
     point_ids = list(context.tracked_points.keys())
     if len(point_ids) == 0:
         initialize_tracking(frame, context)
+        _finish_rest()
         return None, None, None, None
     
     if context.cuda_available:
@@ -316,6 +327,7 @@ def process_frame(frame, context):
         )
         
         # Calculate optical flow on GPU
+        t0 = time.time()
         gpu_p1, gpu_status, _gpu_error = context.gpu_sparse_flow.calc(
             context.old_gray_gpu, frame_gray, gpu_p0, None, stream=context.stream
         )
@@ -326,6 +338,8 @@ def process_frame(frame, context):
         # Download results
         p1 = gpu_p1.download().reshape(-1, 2)
         st = gpu_status.download().reshape(-1)
+        lk_dt = time.time() - t0
+        context._times_lk.append(lk_dt)
         
         # Update GPU state
         context.old_gray_gpu = frame_gray
@@ -334,7 +348,10 @@ def process_frame(frame, context):
         frame_gray = frame_resized
         if len(frame_gray.shape) == 3 and frame_gray.shape[2] > 1:
             frame_gray = cv2.cvtColor(frame_gray, cv2.COLOR_BGR2GRAY)
+        t0 = time.time()
         p1, st, err = cv2.calcOpticalFlowPyrLK(context.old_gray, frame_gray, context.p0, None, **context.lk_params)
+        lk_dt = time.time() - t0
+        context._times_lk.append(lk_dt)
         context.old_gray = frame_gray.copy()
     
     # Map results back to point IDs
@@ -362,6 +379,7 @@ def process_frame(frame, context):
     if len(good_new) == 0:
         # Reinitialize if no good points
         initialize_tracking(frame, context)
+        _finish_rest()
         return None, None, None, None
     
     uvs = (good_new - good_old) #* context.fps  # Convert to velocity in pixels per second
@@ -406,6 +424,7 @@ def process_frame(frame, context):
 
     # print(f"Tracked points: {len(context.tracked_points)}")
     
+    _finish_rest()
     return good_new, good_ids, uvs, duvs
 
 def exclude_invalid_points(context, good_new, good_ids, uvs, duvs, debug=False):

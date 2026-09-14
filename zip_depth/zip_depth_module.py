@@ -5,6 +5,8 @@ Does not use pycuda.autoinit so the CUDA context can be shared with YOLO
 on worker threads.
 """
 
+import time
+
 import cv2
 import numpy as np
 import pycuda.driver as cuda
@@ -66,9 +68,16 @@ def preprocess(frame_bgr, input_size=INPUT_SIZE, dtype=np.float32):
     return np.ascontiguousarray(img, dtype=dtype)
 
 
-def postprocess(depth, original_shape, colormap=cv2.COLORMAP_INFERNO):
-    """Colorize depth and upsample to original HxW."""
-    depth = np.squeeze(depth)
+def build_colormap_lut(colormap=cv2.COLORMAP_INFERNO):
+    """Precompute a (256, 3) BGR LUT from an OpenCV colormap (once, outside the infer loop)."""
+    gray = np.arange(256, dtype=np.uint8).reshape(256, 1)
+    lut = cv2.applyColorMap(gray, colormap).reshape(256, 3)
+    return np.ascontiguousarray(lut)
+
+
+def postprocess(depth, original_shape, lut):
+    """Colorize depth with a precomputed LUT and upsample to original HxW."""
+    depth = np.squeeze(depth).astype(np.float32)
 
     depth_min = depth.min()
     depth_max = depth.max()
@@ -77,8 +86,8 @@ def postprocess(depth, original_shape, colormap=cv2.COLORMAP_INFERNO):
     else:
         depth_norm = np.zeros_like(depth)
 
-    depth_vis = (depth_norm * 255).astype(np.uint8)
-    depth_color = cv2.applyColorMap(depth_vis, colormap)
+    idx = (depth_norm * 255).astype(np.uint8)
+    depth_color = lut[idx]
     out_w, out_h = original_shape[1], original_shape[0]
     if depth_color.shape[1] != out_w or depth_color.shape[0] != out_h:
         depth_color = cv2.resize(depth_color, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
@@ -96,6 +105,9 @@ class ZipDepth:
             warmup_iters: Dummy inferences after load
         """
         self.input_size = input_size
+        self._lut = build_colormap_lut()
+        self._times_infer = []
+        self._times_postprocess = []
 
         cuda.init()
         self.cfx = cuda.Device(0).retain_primary_context()
@@ -124,7 +136,12 @@ class ZipDepth:
         self.cfx.push()
         try:
             inp = preprocess(frame, input_size=self.input_size, dtype=self.engine.input_dtype)
+            t0 = time.time()
             depth_output = self.engine.infer(inp)
-            return postprocess(depth_output, frame.shape[:2])
+            self._times_infer.append(time.time() - t0)
+            t0 = time.time()
+            depth_color = postprocess(depth_output, frame.shape[:2], self._lut)
+            self._times_postprocess.append(time.time() - t0)
+            return depth_color
         finally:
             self.cfx.pop()
