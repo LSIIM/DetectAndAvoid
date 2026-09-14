@@ -75,6 +75,11 @@ class YOLODetector:
         self.alert_box_color = alert_box_color
         self.alert_font_scale = alert_font_scale
         self.alert_thickness = alert_thickness
+        self._times_preprocess = []
+        self._times_inference = []
+        self._times_postprocess = []
+        self._times_track_total = []
+        self._times_post_loop = []
 
     def process_frame(self, frame):
         """
@@ -86,6 +91,7 @@ class YOLODetector:
         Returns:
             tuple: (frame_processado, approach_detected)
         """
+        t0 = time.time()
         results = self.model.track(
             frame,
             persist=True,
@@ -93,7 +99,17 @@ class YOLODetector:
             verbose=False,
             conf=self.confidence_threshold
         )
+        track_dt = time.time() - t0
+        self._times_track_total.append(track_dt)
+        if results and hasattr(results[0], "speed") and results[0].speed:
+            spd = results[0].speed
+            self._times_preprocess.append(float(spd.get("preprocess", 0.0)) / 1000.0)
+            self._times_inference.append(float(spd.get("inference", 0.0)) / 1000.0)
+            self._times_postprocess.append(float(spd.get("postprocess", 0.0)) / 1000.0)
+        else:
+            self._times_inference.append(track_dt)
         
+        t1 = time.time()
         approach_detected = False
         current_frame_max_area = 0.0
         now = time.time()
@@ -126,14 +142,11 @@ class YOLODetector:
 
             self.global_max_area = max(self.global_max_area, current_frame_max_area)
 
-            #self._draw_detections(frame_processed, boxes, confidences, ids)
-
         if not has_detection:
             if self.last_detection_time > 0 and (now - self.last_detection_time) > self.no_det_reset_sec:
                 self.global_max_area = 0.0
 
-        #self._draw_alert(frame_processed)
-        
+        self._times_post_loop.append(time.time() - t1)
         return boxes, confidences, ids, approach_detected
     
     def _calculate_area(self, box):

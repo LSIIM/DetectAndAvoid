@@ -11,7 +11,10 @@ Usage:
 
 import argparse
 import os
+import queue
+import subprocess
 import sys
+import threading
 import time
 import cv2
 import numpy as np
@@ -40,7 +43,6 @@ def parse_arguments():
     # parser.add_argument("--segmentation-update-interval", type=int, default=30, help="Segmentation update interval (default: 30)")
     parser.add_argument("--depth-model-path", type=str, default=ZIPDEPTH_ENGINE_PATH, help="Path to ZipDepth TensorRT engine")
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
-    parser.add_argument("--no-hw-decode", action="store_true", help="Force OpenCV software decode (no nvvidconv scale)")
 
     return parser.parse_args()
 
@@ -75,7 +77,7 @@ def setup_video_capture_ip(ip, out_width=None, out_height=None):
     return cap, fps, frame_width, frame_height
 
 
-def setup_video_capture_path(path, hw_decode=True, out_width=None, out_height=None):
+def setup_video_capture_path(path, out_width=None, out_height=None, hw_decode=True):
     """Setup file capture. HW decode+scale via nvvidconv when hw_decode and size given."""
     probe = cv2.VideoCapture(path)
     if not probe.isOpened():
@@ -97,12 +99,111 @@ def setup_video_capture_path(path, hw_decode=True, out_width=None, out_height=No
 
     return cap, fps, orig_width, orig_height, True
 
-def setup_video_writer(output_path, fps, width, height):
-    """Setup video writer if output path is provided"""
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    return None
+def _align32(n):
+    """nvv4l2h264enc requires width/height multiple of 32 on Jetson."""
+    return max(32, (int(n) + 31) // 32 * 32)
+
+
+class GstHwVideoWriter:
+    """HW encode in a separate gst-launch process (nvv4l2h264enc).
+
+    NVDEC (OpenCV GStreamer capture) and NVENC cannot run together on this
+    Jetson — the decoder hits EOS after ~2 frames even if encode is
+    out-of-process. File capture therefore uses FFmpeg while this writer runs.
+    """
+
+    def __init__(self, output_path, fps, width, height, bitrate=8_000_000):
+        self.enc_w, self.enc_h = _align32(width), _align32(height)
+        self._pad = None
+        fps_n = max(1, int(round(fps or 30)))
+        nvmm = (
+            f"video/x-raw(memory:NVMM),format=NV12,"
+            f"width={self.enc_w},height={self.enc_h}"
+        )
+        cmd = [
+            "gst-launch-1.0", "-e", "-q",
+            "fdsrc", "!",
+            "rawvideoparse",
+            f"width={self.enc_w}",
+            f"height={self.enc_h}",
+            "format=bgr",
+            f"framerate={fps_n}/1",
+            "!",
+            "videoconvert", "!", "video/x-raw,format=BGRx", "!",
+            "nvvidconv", "!", nvmm, "!",
+            "nvv4l2h264enc",
+            f"bitrate={bitrate}",
+            "insert-sps-pps=true",
+            f"idrinterval={fps_n}",
+            "preset-level=1",
+            "maxperf-enable=1",
+            "!",
+            "h264parse", "!", "qtmux", "!",
+            "filesink", f"location={output_path}",
+        ]
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+        )
+        time.sleep(0.2)
+        if self.proc.poll() is not None:
+            raise RuntimeError(
+                f"gst-launch-1.0 exited immediately (code {self.proc.returncode}). "
+                "Confirm gst-launch-1.0, rawvideoparse, nvvidconv and nvv4l2h264enc."
+            )
+
+    def isOpened(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def write(self, frame):
+        if not self.isOpened() or self.proc.stdin is None:
+            raise RuntimeError("GStreamer HW writer is not running")
+        img = np.ascontiguousarray(frame)
+        if img.shape[0] != self.enc_h or img.shape[1] != self.enc_w:
+            if self._pad is None:
+                self._pad = np.zeros((self.enc_h, self.enc_w, 3), dtype=np.uint8)
+            h = min(img.shape[0], self.enc_h)
+            w = min(img.shape[1], self.enc_w)
+            self._pad[:h, :w] = img[:h, :w]
+            if h < self.enc_h:
+                self._pad[h:, :] = 0
+            if w < self.enc_w:
+                self._pad[:, w:] = 0
+            img = self._pad
+        self.proc.stdin.write(img.tobytes())
+
+    def release(self):
+        if self.proc is None:
+            return
+        try:
+            if self.proc.stdin:
+                self.proc.stdin.close()
+            self.proc.wait(timeout=15)
+        except Exception:
+            self.proc.kill()
+        self.proc = None
+
+
+def setup_video_writer(output_path, fps, width, height, bitrate=8_000_000):
+    """Setup GStreamer HW encoder (nvv4l2h264enc) if output path is provided."""
+    if not output_path:
+        return None
+
+    try:
+        writer = GstHwVideoWriter(output_path, fps, width, height, bitrate)
+    except FileNotFoundError:
+        print("WARNING: gst-launch-1.0 not found. Recording disabled.")
+        return None
+    except Exception as e:
+        print(f"WARNING: GStreamer HW writer failed to start: {e} Recording disabled.")
+        return None
+
+    print(
+        f"Video writer: gst-launch nvv4l2h264enc "
+        f"in {width}x{height} -> enc {writer.enc_w}x{writer.enc_h} -> {output_path}"
+    )
+    return writer
 
 
 # ============================= CONFIGURAÇÕES =============================
@@ -166,6 +267,48 @@ def process_flow_threaded(frame, flow_context):
         print(f"Error in Optical Flow processing: {e}")
         return frame, False   
 
+
+def _print_breakdown(
+    times_capture,
+    times_resize,
+    times_queue_wait,
+    times_yolo,
+    times_depth,
+    times_flow,
+    times_combine,
+    times_write,
+    zip_depth=None,
+    flow_context=None,
+    yolo_detector=None,
+):
+    def _line(label, xs):
+        if not xs:
+            return
+        print(f"{label:22s} {np.mean(xs) * 1000:6.2f} ms/frame")
+
+    print("\n--- Breakdown médio por etapa ---")
+    _line("Capture:", times_capture)
+    _line("Resize (CPU shared):", times_resize)
+    _line("Queue wait:", times_queue_wait)
+    _line("YOLO (wait result):", times_yolo)
+    _line("Depth (wait result):", times_depth)
+    _line("Flow (wait result):", times_flow)
+    _line("Combine:", times_combine)
+    _line("Write:", times_write)
+    if yolo_detector is not None:
+        _line("YOLO preprocess:", getattr(yolo_detector, "_times_preprocess", None))
+        _line("YOLO inference:", getattr(yolo_detector, "_times_inference", None))
+        _line("YOLO postprocess:", getattr(yolo_detector, "_times_postprocess", None))
+        _line("YOLO track() total:", getattr(yolo_detector, "_times_track_total", None))
+        _line("YOLO post loop:", getattr(yolo_detector, "_times_post_loop", None))
+    if zip_depth is not None:
+        _line("Depth infer:", getattr(zip_depth, "_times_infer", None))
+        _line("Depth postprocess:", getattr(zip_depth, "_times_postprocess", None))
+    if flow_context is not None:
+        _line("Flow LK:", getattr(flow_context, "_times_lk", None))
+        _line("Flow rest:", getattr(flow_context, "_times_rest", None))
+
+
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
@@ -189,7 +332,7 @@ def main():
                 raise ValueError(f"Could not open video file: {url}")
             fps, orig_width, orig_height = _cap_props(probe)
             probe.release()
-            processing_width = int(orig_width * (args.resize_height / orig_height))
+            processing_width = int(orig_width * (args.resize_height / orig_height)) & ~1
             processing_height = args.resize_height
             cap, fps, cap_w, cap_h = setup_video_capture_ip(
                 args.video_ip, processing_width, processing_height
@@ -203,14 +346,18 @@ def main():
                 raise ValueError(f"Could not open video file: {args.video_path}")
             fps, orig_width, orig_height = _cap_props(probe)
             probe.release()
-            processing_width = int(orig_width * (args.resize_height / orig_height))
+            processing_width = int(orig_width * (args.resize_height / orig_height)) & ~1
             processing_height = args.resize_height
+            # NVDEC + NVENC together EOS the capture after ~2 frames on this Jetson.
+            hw_decode = not bool(args.output)
             cap, fps, _ow, _oh, hw_scaled = setup_video_capture_path(
                 args.video_path,
-                hw_decode=not args.no_hw_decode,
                 out_width=processing_width,
                 out_height=processing_height,
+                hw_decode=hw_decode,
             )
+            if not hw_decode:
+                print("File capture: OpenCV/FFmpeg (NVDEC off while HW encoder is active)")
             if hw_scaled:
                 cw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
                 ch = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
@@ -279,30 +426,81 @@ def main():
             writer.release()
         return 1
     
-    # Setup thread pool for parallel processing
     # Use 3 threads for 3 modules (optimal for Jetson Orin NX with 8 cores)
     executor = ThreadPoolExecutor(max_workers=3)
     
     # Main processing loop
     print("\n--- Starting video processing ---")
-    print("Using parallel processing with 3 threads")
+    print("Using parallel processing with 3 threads + capture producer")
     frame_count = 0
     total_processing_start_time = time.time()
+    times_capture = []
+    times_resize = []
+    times_queue_wait = []
+    times_yolo = []
+    times_depth = []
+    times_flow = []
+    times_combine = []
+    times_write = []
+
+    SENTINEL = None
+    frame_q = queue.Queue(maxsize=2)
+    stop_event = threading.Event()
+
+    def _put_frame(item):
+        while True:
+            if item is not SENTINEL and stop_event.is_set():
+                return False
+            try:
+                frame_q.put(item, timeout=0.2)
+                return True
+            except queue.Full:
+                if item is SENTINEL:
+                    try:
+                        frame_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    continue
+                if stop_event.is_set():
+                    return False
+                continue
+
+    def capture_worker():
+        frame_id = 0
+        try:
+            while not stop_event.is_set():
+                t0 = time.time()
+                ret, frame = cap.read()
+                capture_dt = time.time() - t0
+                if not ret:
+                    print(f"Capture ended (ret=False) after {frame_id} frames")
+                    break
+                times_capture.append(capture_dt)
+                if hw_scaled:
+                    resized_frame = frame
+                    times_resize.append(0.0)
+                else:
+                    t0 = time.time()
+                    resized_frame = cv2.resize(frame, (processing_width, processing_height))
+                    times_resize.append(time.time() - t0)
+                frame_id += 1
+                if not _put_frame((frame_id, resized_frame)):
+                    break
+        finally:
+            _put_frame(SENTINEL)
+
+    capture_thread = threading.Thread(target=capture_worker, name="capture", daemon=True)
+    capture_thread.start()
     
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
+            t0 = time.time()
+            item = frame_q.get()
+            times_queue_wait.append(time.time() - t0)
+            if item is SENTINEL:
                 break
-            
+            frame_count, resized_frame = item
             frame_start_time = time.time()
-            frame_count += 1
-        
-            # Frame already at processing size when nvvidconv scaled
-            if hw_scaled:
-                resized_frame = frame
-            else:
-                resized_frame = cv2.resize(frame, (processing_width, processing_height))
             
             # Shared buffer: workers do not write the color frame
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
@@ -311,14 +509,21 @@ def main():
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
             
             # Wait for all results (parallel execution happens here)
+            t0 = time.time()
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
+            times_yolo.append(time.time() - t0)
             # sky_result, sky_flight_status, sky_ratio = future_sky.result()
+            t0 = time.time()
             depth_color = future_depth.result()
+            times_depth.append(time.time() - t0)
+            t0 = time.time()
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
+            times_flow.append(time.time() - t0)
             
             frame_processing_time = time.time() - frame_start_time
             
             # Create combined display
+            t0 = time.time()
             combined_frame = resized_frame.copy()
 
             # sky_result in 50% alpha red in combined_frame
@@ -358,15 +563,21 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
             
             display = np.hstack([combined_frame, depth_color])
+            times_combine.append(time.time() - t0)
 
             # Write frame if output is specified
             if writer:
+                t0 = time.time()
                 writer.write(display)
+                times_write.append(time.time() - t0)
+            else:
+                times_write.append(0.0)
             
             if not args.no_display:
                 cv2.imshow("DetectAndAvoid - YOLO | Optical Flow | ZipDepth", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27 or key == ord('q'):
+                    stop_event.set()
                     break
                 elif key == ord('s'):
                     cv2.imwrite(f"frame_{frame_count:06d}.jpg", display)
@@ -375,6 +586,19 @@ def main():
             # Print progress every 100 frames
             if frame_count % 100 == 0:
                 print(f"Processed {frame_count} frames...")
+                _print_breakdown(
+                    times_capture,
+                    times_resize,
+                    times_queue_wait,
+                    times_yolo,
+                    times_depth,
+                    times_flow,
+                    times_combine,
+                    times_write,
+                    zip_depth,
+                    flow_context,
+                    yolo_detector,
+                )
         
             
             # Atualizar progresso
@@ -386,13 +610,16 @@ def main():
             #     print(f"Progresso: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
             #           f"FPS médio: {avg_fps:.2f} | ETA: {eta:.1f}s")
     except KeyboardInterrupt:
+        stop_event.set()
         print("\nProcessing interrupted by user")
     
     except Exception as e:
+        stop_event.set()
         print(f"Error during processing: {e}")
     
     finally:
-        # Shutdown thread pool
+        stop_event.set()
+        capture_thread.join(timeout=2.0)
         executor.shutdown(wait=True)
         
         # Cleanup
@@ -403,6 +630,19 @@ def main():
         print(f"Total frames processed: {frame_count}")
         print(f"Total time: {total_time:.2f}s")
         print(f"Average FPS: {avg_fps:.2f}")
+        _print_breakdown(
+            times_capture,
+            times_resize,
+            times_queue_wait,
+            times_yolo,
+            times_depth,
+            times_flow,
+            times_combine,
+            times_write,
+            zip_depth,
+            flow_context,
+            yolo_detector,
+        )
         
         cap.release()
         if writer:

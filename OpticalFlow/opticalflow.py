@@ -76,6 +76,8 @@ class OpticalFlowContext:
         self.detection_mask = None
         self.mask_recovery_rate = 1  # Value added per frame to recover regions
         self.invalid_region_radius = 20  # Radius around invalid points to block
+        self._times_lk = []
+        self._times_rest = []
 
 def generate_random_colors(n_colors):
     """Generate n_colors random colors with good visibility"""
@@ -145,6 +147,11 @@ def initialize_tracking(frame, context):
 
 def process_frame(frame, context):
     """Process a single frame with optical flow"""
+    t_start = time.time()
+    lk_dt = 0.0
+
+    def _finish_rest():
+        context._times_rest.append(time.time() - t_start - lk_dt)
 
     # Reprocess good features after certain number of frames
     if context.p0 is not None and (context.frame_iter % int(0.5 * context.fps) == 0) and len(context.p0) < context.max_point:
@@ -205,6 +212,7 @@ def process_frame(frame, context):
             context.p0 = tmp_p.reshape(-1, 1, 2)
 
     if frame is None:
+        _finish_rest()
         return None, None, None, None
     
     # Check if frame is gray or color
@@ -217,20 +225,26 @@ def process_frame(frame, context):
     # Initialize tracking if needed
     if context.p0 is None or context.old_gray is None:
         if not initialize_tracking(frame_gray, context):
+            _finish_rest()
             return None, None, None, None
+        _finish_rest()
         return None, None, None, None
         
     # Get current tracked point IDs and positions
     point_ids = list(context.tracked_points.keys())
     if len(point_ids) == 0:
         initialize_tracking(frame_gray, context)
+        _finish_rest()
         return None, None, None, None
     
     # Build p0 array from tracked points
     context.p0 = np.array([context.tracked_points[pid].position for pid in point_ids]).reshape(-1, 1, 2)
     
     # Calculate optical flow
+    t0 = time.time()
     p1, st, err = cv2.calcOpticalFlowPyrLK(context.old_gray, frame_gray, context.p0, None, **context.lk_params)
+    lk_dt = time.time() - t0
+    context._times_lk.append(lk_dt)
     
     # Map results back to point IDs
     good_ids = []
@@ -257,6 +271,7 @@ def process_frame(frame, context):
     if len(good_new) == 0:
         # Reinitialize if no good points
         initialize_tracking(frame, context)
+        _finish_rest()
         return None, None, None, None
     
     uvs = (good_new - good_old) #* context.fps  # Convert to velocity in pixels per second
@@ -296,6 +311,7 @@ def process_frame(frame, context):
 
     # print(f"Tracked points: {len(context.tracked_points)}")
     
+    _finish_rest()
     return good_new, good_ids, uvs, duvs
 
 def exclude_invalid_points(context, good_new, good_ids, uvs, duvs, debug=False):
