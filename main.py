@@ -16,12 +16,12 @@ import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-from Yolo.Yolo11.modules.yolo_module import YOLODetector
-from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
-from OpticalFlow import opticalflow as optical_flow
+from module.yolo_module import YOLODetector, kalman_filter
+from module.sky_seg_module import SkySegmentation
+from module import opticalflow as optical_flow
 
-YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
-HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
+YOLO_MODEL_PATH = r"/Weights/best_yolo26_drone_bird_aircraft_junho_2026.pt"
+HORIZON_MODEL_PATH = r"Weights/skyseg_fp16.onnx"
 
 
 def parse_arguments():
