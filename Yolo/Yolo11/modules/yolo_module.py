@@ -40,8 +40,7 @@ class YOLODetector:
             _, ext = os.path.splitext(model_path)
 
             if ext.lower() == '.engine':
-            
-            if self.device == "cpu":
+                if self.device == "cpu":
                     raise RuntimeError(
                         "Modelo TensorRT (.engine) requer CUDA; use um modelo .pt para CPU"
                     )
