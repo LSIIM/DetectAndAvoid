@@ -73,6 +73,119 @@ pip install numpy==1.23.5
 
 ---
 
+## 4) Uso da classe `kalman_filter` e do `track_id`
+
+A classe `kalman_filter` foi pensada para acompanhar a mesma instância detectada ao longo do tempo. Ela armazena o estado do filtro por `track_id`, então o `track_id` precisa ser estável para o mesmo objeto entre frames consecutivos.
+
+### 4.1) Como o `track_id` deve funcionar
+
+O valor de `track_id` deve seguir estas regras:
+
+- Deve ser único para cada objeto detectado no momento atual.
+- Deve permanecer o mesmo para o mesmo objeto enquanto ele continuar visível.
+- Não deve ser reutilizado para outro objeto antes que o anterior seja descartado ou perdido.
+- Em geral, a melhor origem do `track_id` é a própria saída do YOLO (`results[0].boxes.id`), quando houver tracking interno habilitado.
+
+Se o YOLO não entregar `boxes.id`, o código pode gerar IDs locais usando a lógica de associação dos boxe anteriores e da última detecção. Nesse caso, o fluxo esperado é:
+
+1. Comparar detecção atual com a última detecção conhecida.
+2. Usar IoU/distância para associar o objeto ao mesmo `track_id` anterior.
+3. Se não houver correspondência, gerar um id novo (`_new_track_ids`).
+
+### 4.2) Modo de uso recomendado
+
+O uso correto do filtro é feito juntos com os IDs de detecção e as coordenadas da caixa:
+
+```python
+kalman = kalman_filter(process_noise=1e-2, measurement_noise=1e-1, prediction_horizon_sec=0.5)
+
+boxes, confidences, ids, approach_detected = detector.process_frame(frame)
+future_centers = kalman.process_kalman(ids, boxes, time.time())
+
+for track_id in ids:
+    predicted = kalman.predict_future_position(track_id, 0.5)
+    if predicted is not None:
+        print(track_id, predicted)
+```
+
+Nesse fluxo:
+
+- `ids` representa os objetos ativos naquele frame.
+- `boxes` contém as caixas detectadas.
+- `process_kalman(...)` atualiza o estado do filtro com o centro de cada caixa e retorna as posições futuras estimadas.
+- `predict_future_position(...)` usa o histórico do objeto para prever onde ele estará em um horizonte futuro.
+
+### 4.3) O que acontece se o `track_id` estiver errado
+
+Se dois objetos diferentes compartilharem o mesmo ID, ou se o mesmo objeto receber um ID diferente em frames sucessivos, o filtro de Kalman mistura estados distintos. O resultado costuma ser:
+
+- previsão de posição instável;
+- deslocamentos bruscos ou "saltos";
+- associação incorreta entre objetos em frames seguintes;
+- perda de precisão no cálculo de aproximação.
+
+Em resumo: o filtro depende diretamente da continuidade do identificador. O `track_id` deve representar a mesma entidade ao longo do tempo.
+
+### 4.4) Relação com o tracking do YOLO
+
+No código do projeto, há dois cenários:
+
+- `results[0].boxes.id is not None`: o YOLO já fornece o tracking, então o `track_id` deve ser reaproveitado diretamente.
+- `results[0].boxes.id is None`: o código usa `_assign_track_ids(...)` para inferir associação entre detecções novas e antigas.
+
+Em ambos os casos, a regra principal é a mesma: um objeto deve manter um único `track_id` enquanto continuar presente na cena.
+
+### 4.5) Como usar `tracked_objects`
+
+O parâmetro `tracked_objects` representa o estado do frame anterior. Ele deve conter, para cada objeto já identificado, o último box e o número de frames perdidos.
+
+Estrutura esperada:
+
+```python
+tracked_objects = {
+    12: {
+        "box": [x1, y1, x2, y2],
+        "frames_lost": 0,
+    },
+    13: {
+        "box": [x1, y1, x2, y2],
+        "frames_lost": 1,
+    }
+}
+```
+
+Esse dicionário é usado para:
+
+- recuperar o último box do objeto;
+- comparar a detecção atual com a última posição conhecida;
+- decidir se o objeto continua sendo o mesmo;
+- evitar que um ID novo seja gerado quando o mesmo objeto ainda está na cena.
+
+Em outras palavras, `tracked_objects` é o histórico de associação da última iteração e funciona como a memória do tracker. Sem ele, o sistema perde a continuidade entre frames e o `track_id` vira inconsistente.
+
+Exemplo de uso:
+
+```python
+boxes, confidences, ids, approach_detected = detector.process_frame(
+    frame,
+    tracked_objects=tracked_objects,
+    box_offset=(0, 0),
+    last_frame=previous_frame,
+)
+
+# Atualize o histórico para o próximo frame
+tracked_objects = {
+    track_id: {
+        "box": box.tolist(),
+        "frames_lost": 0,
+    }
+    for track_id, box in zip(ids, boxes)
+}
+```
+
+> Observação: o `track_id` precisa ser consistente no `tracked_objects` do frame anterior para que a associação `ID atual ↔ ID anterior` funcione corretamente. Caso contrário, o filtro de Kalman e o tracker podem divergir e prever posições erradas.
+
+---
 
 ## 5) Solução de problemas
 - **Permissões do pip (Ubuntu 22.04)**: se instalar fora do `venv`, pode ser necessário `pip install --break-system-packages`.

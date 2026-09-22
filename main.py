@@ -135,6 +135,48 @@ def process_flow_threaded(frame, flow_context):
         print(f"Error in Optical Flow processing: {e}")
         return frame
 
+def min_wind(roi, min_size, max_width, max_height):
+    """Ensure the ROI has a minimum size and is within bounds"""
+    x1, y1, x2, y2 = roi
+    if x2 - x1 < min_size:
+        x2 = x2 + min_size//2
+        if x2 > max_width:
+            x1 -= ((max_width - x2) + min_size//2)
+            x2 = max_width
+        else:
+            x1 -= min_size//2
+            if x1 < 0:
+                x1 = 0
+                x2 = min_size
+    if y2 - y1 < min_size:
+        y2 = y2 + min_size//2
+        if y2 > max_height:
+            y1 -= ((max_height - y2) + min_size//2)
+            y2 = max_height
+        else:
+            y1 -= min_size//2
+            if y1 < 0:
+                y1 = 0
+                y2 = min_size
+    return [x1, y1, x2, y2]
+
+def boxes_roi(boxes, min_size, max_width, max_height):
+    """Build one bounded ROI containing all tracked detections."""
+    if boxes is None or len(boxes) == 0:
+        return None
+    boxes = np.asarray(boxes)
+    return min_wind(
+        [
+            int(np.min(boxes[:, 0])),
+            int(np.min(boxes[:, 1])),
+            int(np.max(boxes[:, 2])),
+            int(np.max(boxes[:, 3])),
+        ],
+        min_size,
+        max_width,
+        max_height,
+    )
+
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
@@ -180,7 +222,8 @@ def main():
         # Optical Flow setup
         print("Setting up Optical Flow...")
         flow_context = optical_flow.setup(
-            max_point=40
+            max_point=40,
+            number_clusters=args.clusters
         )
         print("Setting up YOLO detector...")
         yolo_detector = YOLODetector(
@@ -205,7 +248,7 @@ def main():
             sky_upper_threshold=SKY_UPPER_THRESHOLD,
             sky_lower_threshold=SKY_LOWER_THRESHOLD,
             binary_threshold=BINARY_THRESHOLD,
-            use_tensorrt=USE_TENSORRT_SKYSEG 
+            use_tensorrt=USE_TENSORRT_SKYSEG
         )
         
         print("All modules setup successfully!")
@@ -246,8 +289,8 @@ def main():
             
             # Wait for all results (parallel execution happens here)
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
-            sky_result, sky_flight_status, sky_ratio = future_sky.result()
-            flow_new, flow_ids, flow_uvs = future_flow.result()
+            # sky_result, sky_flight_status, sky_ratio = future_sky.result()
+            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             
             frame_processing_time = time.time() - frame_start_time
             
@@ -255,10 +298,10 @@ def main():
             combined_frame = resized_frame.copy()
 
             # sky_result in 50% alpha red in combined_frame
-            if sky_result is not None:
-                alpha = 0.5
-                colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
-                combined_frame[sky_result == 255] = colored_region[sky_result == 255]
+            # if sky_result is not None and False:
+            #     alpha = 0.5
+            #     colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
+            #     combined_frame[sky_result == 255] = colored_region[sky_result == 255]
 
             # Draw yolo_result detections on combined_frame
             if yolo_result is not None:

@@ -73,13 +73,17 @@ class kalman_filter:
             if horizon_sec is None else max(0.0, horizon_sec)
         )
         return {
-            track_id: self._predict_future_position(track_id, horizon)
+            track_id: self.predict_future_position(track_id, horizon)
             for track_id in self.predicted_positions
         }
 
+    def predict_future_position(self, track_id, horizon_sec):
+        """Prevê a posição de um track após um horizonte específico em segundos."""
+        if track_id not in self.kalman_filters:
+            return None
+        return self._predict_future_position(track_id, max(0.0, horizon_sec))
+
     def process_kalman(self, ids, boxes,timestamp):
-        if len(ids) > 0 and len(boxes) > 0:
-            self.predicted_positions = {}
         future_center = []
         for box, track_id in zip(boxes, ids):
             center = self._box_center(box)
@@ -165,6 +169,7 @@ class YOLODetector:
         
         self.track_history = {}
         self.track_colors = {}
+        self.next_track_id = 0
 
         self.global_max_area = 0.0
         self.last_approach_time = 0.0
@@ -191,7 +196,7 @@ class YOLODetector:
                 continue
         raise RuntimeError(f"Não foi possível inferir task para: {model_path}")
 
-    def process_frame(self, frame):
+    def process_frame(self, frame, tracked_objects=None, box_offset=(0, 0), last_frame=None):
         """
         Processa um frame com YOLO
         
@@ -200,16 +205,17 @@ class YOLODetector:
             
         Returns:
             tuple: (boxes, confidences, ids, approach_detected)
+            tracked_objects: Estado das detecções anteriores, indexado pelo ID.
+            box_offset: Deslocamento do recorte em relação ao frame completo.
         """
         frame_processed = frame.copy()
         
-        results = self.model.track(
+        results = self.model.predict(
             frame_processed, 
-            persist=True, 
-            tracker=self.tracker_config,
             verbose=False, 
             conf=self.confidence_threshold,
-            device=self.device
+            device=self.device,
+            iou=0.13
         )
         
         approach_detected = False
@@ -233,8 +239,10 @@ class YOLODetector:
             
             if results[0].boxes.id is not None:
                 ids = results[0].boxes.id.int().cpu().tolist()
+            elif tracked_objects is not None:
+                ids = self._assign_track_ids(boxes, tracked_objects, box_offset, frame, last_frame)
             else:
-                ids = list(range(len(boxes)))
+                ids = self._new_track_ids(len(boxes))
 
             for box in boxes:
                 area = self._calculate_area(box)
@@ -256,6 +264,95 @@ class YOLODetector:
         #self._draw_alert(frame_processed)
         
         return boxes, confidences, ids, approach_detected
+
+    def _new_track_ids(self, count):
+        """Gera IDs monotônicos para detecções sem estado de tracking."""
+        ids = list(range(self.next_track_id, self.next_track_id + count))
+        self.next_track_id += count
+        return ids
+
+    def _assign_track_ids(self, boxes, tracked_objects, box_offset, frame, last_frame):
+        """Associa detecções atuais às caixas anteriores usando IoU e centro."""
+        offset_x, offset_y = box_offset
+        previous = []
+        for track_id, track in tracked_objects.items():
+            box = np.asarray(track["box"], dtype=np.float32).copy()
+            box[[0, 2]] -= offset_x
+            box[[1, 3]] -= offset_y
+            previous.append((track_id, box, track.get("frames_lost", 0)))
+
+        unmatched = set(range(len(previous)))
+        assignments = {}
+        candidates = []
+        # text = ""
+        for detection_index, box in enumerate(boxes):
+            current = np.asarray(box, dtype=np.float32)
+            current_center = np.array(
+                [(current[0] + current[2]) / 2, (current[1] + current[3]) / 2]
+            )
+            current_diagonal = max(
+                1.0, float(np.hypot(current[2] - current[0], current[3] - current[1]))
+            )
+            for previous_index, (_, old_box, frames_lost) in enumerate(previous):
+                if previous_index not in unmatched:
+                    continue
+                frame_debug = frame.copy()
+                old_center = np.array(
+                    [(old_box[0] + old_box[2]) / 2, (old_box[1] + old_box[3]) / 2]
+                )
+                cv.circle(frame_debug, (int(current_center[0]), int(current_center[1])), 5, (0, 255, 0), -1)
+                cv.circle(frame_debug, (int(old_center[0]), int(old_center[1])), 5, (0, 0, 255), -1)
+                
+                distance = float(np.linalg.norm(current_center - old_center))
+                diagonal = max(
+                    current_diagonal,
+                    float(np.hypot(old_box[2] - old_box[0], old_box[3] - old_box[1])),
+                )
+                iou = self._box_iou(current, old_box)
+                max_distance = max(30.0, diagonal * (1.25 + 0.125 * frames_lost))
+                # text += (f"\n    Detection {detection_index} vs Previous {previous_index}: IoU={iou:.3f}, Distance={distance:.2f}, MaxDistance={max_distance:.2f}, lost={frames_lost}")
+                if iou >= 0.05 or distance <= max_distance:
+                    distance_score = distance / current_diagonal
+                    reach_score = distance / max_distance
+                    score = (1.0 - iou) + 0.75 * distance_score + 0.25 * reach_score
+                    # text += (f"\n    Candidate {previous_index}: Score={score:.3f}")
+                    if score < 6:
+                        candidates.append((score, detection_index, previous_index))
+                    else:
+                        continue
+                        # text += (" - Rejeitado por score alto")
+                if last_frame is not None:
+                    continue
+                    cv.imshow("Last Frame", last_frame)
+                #cv.imshow("Debug", frame_debug)
+                #cv.waitKey(1)
+            # text += ("\n Sai")
+
+        for _, detection_index, previous_index in sorted(candidates):
+            if detection_index in assignments or previous_index not in unmatched:
+                continue
+            assignments[detection_index] = previous[previous_index][0]
+            unmatched.remove(previous_index)
+
+        ids = []
+        for detection_index in range(len(boxes)):
+            track_id = assignments.get(detection_index)
+            if track_id is None:
+                track_id = self._new_track_ids(1)[0]
+            ids.append(track_id)
+        return ids
+
+    @staticmethod
+    def _box_iou(first_box, second_box):
+        x1 = max(first_box[0], second_box[0])
+        y1 = max(first_box[1], second_box[1])
+        x2 = min(first_box[2], second_box[2])
+        y2 = min(first_box[3], second_box[3])
+        intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        first_area = max(0.0, first_box[2] - first_box[0]) * max(0.0, first_box[3] - first_box[1])
+        second_area = max(0.0, second_box[2] - second_box[0]) * max(0.0, second_box[3] - second_box[1])
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
     
     def _calculate_area(self, box):
         """Calcula a área de uma caixa delimitadora"""
@@ -277,19 +374,19 @@ class YOLODetector:
                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             
             
-            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-            if tid not in self.track_history:
-                self.track_history[tid] = deque(maxlen=self.trail_length)
-                self.track_colors[tid] = (
-                    int(np.random.randint(50, 255)),
-                    int(np.random.randint(50, 255)),
-                    int(np.random.randint(50, 255))
-                )
-            self.track_history[tid].append((cx, cy))
+            # cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            # if tid not in self.track_history:
+            #     self.track_history[tid] = deque(maxlen=self.trail_length)
+            #     self.track_colors[tid] = (
+            #         int(np.random.randint(50, 255)),
+            #         int(np.random.randint(50, 255)),
+            #         int(np.random.randint(50, 255))
+            #     )
+            # self.track_history[tid].append((cx, cy))
             
-            pts = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
-            if len(pts) > 1:
-                cv.polylines(frame, [pts], False, self.track_colors[tid], 2)
+            # pts = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
+            # if len(pts) > 1:
+            #     cv.polylines(frame, [pts], False, self.track_colors[tid], 2)
         return frame, future_center, w, h
     
     def _draw_alert(self, frame):
@@ -317,6 +414,7 @@ class YOLODetector:
         """Reseta o estado do detector"""
         self.track_history.clear()
         self.track_colors.clear()
+        self.next_track_id = 0
         self.global_max_area = 0.0
         self.last_approach_time = 0.0
 
