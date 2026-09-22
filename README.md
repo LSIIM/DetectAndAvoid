@@ -63,15 +63,15 @@ python -c "import cv2; print(cv2.cuda.getCudaEnabledDeviceCount())"
 
 Para instalar rode o script. Esse processo deve levar vários minutos.
 ```bash
-chmod +x install_opencv_cuda.sh
-./install_opencv_cuda.sh
+chmod +x utils/install_opencv_cuda.sh
+./utils/install_opencv_cuda.sh
 ```
 
 
 ### 4) Gerar .engine
 Arquivo otimizado do modelo YOLO para GPU.
 ```bash
-python .\Yolo\Yolo11\yolo_to_TensorRT.py
+python ./utils/export_yolo_to_TensorRT.py
 ```
 
 ### Uso

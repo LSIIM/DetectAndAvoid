@@ -18,14 +18,15 @@ import threading
 import time
 import cv2
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from Yolo.Yolo11.modules.yolo_module import YOLODetector
-# from Yolo.Yolo11.modules.sky_seg_module import SkySegmentation
+from module.sky_seg_module import SkySegmentation
 from zip_depth.zip_depth_module import ZipDepth
 from OpticalFlow import opticalflow as optical_flow
 
 YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
-# HORIZON_MODEL_PATH = r"Sky_Seg/skyseg_fp16.onnx"
+HORIZON_MODEL_PATH = r"Weights/skyseg_fp16.onnx"
 ZIPDEPTH_ENGINE_PATH = r"zip_depth/zipdepth_base_384x384_fp16.trt"
 
 
@@ -309,6 +310,48 @@ def _print_breakdown(
         _line("Flow rest:", getattr(flow_context, "_times_rest", None))
 
 
+def min_wind(roi, min_size, max_width, max_height):
+    """Ensure the ROI has a minimum size and is within bounds"""
+    x1, y1, x2, y2 = roi
+    if x2 - x1 < min_size:
+        x2 = x2 + min_size//2
+        if x2 > max_width:
+            x1 -= ((max_width - x2) + min_size//2)
+            x2 = max_width
+        else:
+            x1 -= min_size//2
+            if x1 < 0:
+                x1 = 0
+                x2 = min_size
+    if y2 - y1 < min_size:
+        y2 = y2 + min_size//2
+        if y2 > max_height:
+            y1 -= ((max_height - y2) + min_size//2)
+            y2 = max_height
+        else:
+            y1 -= min_size//2
+            if y1 < 0:
+                y1 = 0
+                y2 = min_size
+    return [x1, y1, x2, y2]
+
+def boxes_roi(boxes, min_size, max_width, max_height):
+    """Build one bounded ROI containing all tracked detections."""
+    if boxes is None or len(boxes) == 0:
+        return None
+    boxes = np.asarray(boxes)
+    return min_wind(
+        [
+            int(np.min(boxes[:, 0])),
+            int(np.min(boxes[:, 1])),
+            int(np.max(boxes[:, 2])),
+            int(np.max(boxes[:, 3])),
+        ],
+        min_size,
+        max_width,
+        max_height,
+    )
+
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
@@ -385,7 +428,8 @@ def main():
         # Optical Flow setup
         print("Setting up Optical Flow...")
         flow_context = optical_flow.setup(
-            max_point=40
+            max_point=40,
+            number_clusters=args.clusters
         )
         print("Setting up YOLO detector...")
         yolo_detector = YOLODetector(
@@ -401,9 +445,22 @@ def main():
             alert_font_scale=ALERT_FONT_SCALE,
             alert_thickness=ALERT_THICKNESS
         )
+<<<<<<< HEAD
         print("Setting up ZipDepth...")
         zip_depth = ZipDepth(
             model_path=args.depth_model_path
+=======
+        print("Setting up Sky Segmentation...")
+        sky_segmentation = SkySegmentation(
+            model_path=args.horizon_model_path,
+            input_size=HORIZON_MODEL_INPUT_SIZE,
+            update_interval=args.segmentation_update_interval,
+            sample_area_size=SAMPLE_AREA_SIZE,
+            sky_upper_threshold=SKY_UPPER_THRESHOLD,
+            sky_lower_threshold=SKY_LOWER_THRESHOLD,
+            binary_threshold=BINARY_THRESHOLD,
+            use_tensorrt=USE_TENSORRT_SKYSEG
+>>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
         )
         # print("Setting up Sky Segmentation...")
         # sky_segmentation = SkySegmentation(
@@ -502,15 +559,23 @@ def main():
             frame_count, resized_frame = item
             frame_start_time = time.time()
             
+<<<<<<< HEAD
             # Shared buffer: workers do not write the color frame
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
             # future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
+=======
+            # Submit all processing tasks in parallel
+            future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
+            #future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
+            future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
+>>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
             # Wait for all results (parallel execution happens here)
             t0 = time.time()
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
+<<<<<<< HEAD
             times_yolo.append(time.time() - t0)
             # sky_result, sky_flight_status, sky_ratio = future_sky.result()
             t0 = time.time()
@@ -519,6 +584,10 @@ def main():
             t0 = time.time()
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             times_flow.append(time.time() - t0)
+=======
+            # sky_result, sky_flight_status, sky_ratio = future_sky.result()
+            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
+>>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
             frame_processing_time = time.time() - frame_start_time
             
@@ -527,7 +596,11 @@ def main():
             combined_frame = resized_frame.copy()
 
             # sky_result in 50% alpha red in combined_frame
+<<<<<<< HEAD
             # if sky_result is not None:
+=======
+            # if sky_result is not None and False:
+>>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             #     alpha = 0.5
             #     colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
             #     combined_frame[sky_result == 255] = colored_region[sky_result == 255]
