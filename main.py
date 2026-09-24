@@ -24,7 +24,7 @@ from modules.YOLO.yolo_module import YOLODetector
 from modules.depth.zip_depth_module import ZipDepth
 from modules.Optical_Flow import opticalflow as optical_flow
 
-YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
+YOLO_MODEL_PATH = r"weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 ZIPDEPTH_ENGINE_PATH = r"weights/zipdepth_base_384x384_fp16.trt"
 
 
@@ -515,14 +515,6 @@ def main():
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
-<<<<<<< HEAD
-=======
-=======
-            # Submit all processing tasks in parallel
-            future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
-            future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
->>>>>>> 1907fa9 (refac: moving depth to modules/ folder. Add a folder for each model/algoritm w respective module, init and README. Changed main imports.)
             
             # Wait for all results (parallel execution happens here)
             t0 = time.time()
@@ -534,12 +526,6 @@ def main():
             t0 = time.time()
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             times_flow.append(time.time() - t0)
-<<<<<<< HEAD
-=======
-=======
-            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
->>>>>>> 1907fa9 (refac: moving depth to modules/ folder. Add a folder for each model/algoritm w respective module, init and README. Changed main imports.)
             
             frame_processing_time = time.time() - frame_start_time
             
@@ -547,15 +533,6 @@ def main():
             t0 = time.time()
             combined_frame = resized_frame.copy()
 
-<<<<<<< HEAD
-            # sky_result in 50% alpha red in combined_frame
-            # if sky_result is not None:
-            #     alpha = 0.5
-            #     colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
-            #     combined_frame[sky_result == 255] = colored_region[sky_result == 255]
-
-=======
->>>>>>> 1907fa9 (refac: moving depth to modules/ folder. Add a folder for each model/algoritm w respective module, init and README. Changed main imports.)
             # Draw yolo_result detections on combined_frame
             if yolo_result is not None:
                 combined_frame = yolo_detector.draw_detections(combined_frame, yolo_result, yolo_confidence, yolo_ids)
@@ -572,7 +549,7 @@ def main():
                 combined_frame = cv2.circle(combined_frame, (a, b), 5, flow_context.colors[0], -1)
                 combined_frame = cv2.arrowedLine(combined_frame, (a, b), (int(a + u), int(b + v)), flow_context.colors[1], 2, tipLength=0.2)
 
-            if  flow_new is not None:
+            if flow_new is not None:
                 vetor/len(flow_ids)
                 vetor * fps
 
@@ -623,17 +600,7 @@ def main():
                     flow_context,
                     yolo_detector,
                 )
-        
-            
-            # Atualizar progresso
-            # if frame_count % 30 == 0:
-            #     elapsed_time = time.time() - total_processing_start_time
-            #     avg_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
-            #     eta = ((elapsed_time / frame_count) * (total_frames - frame_count)) if frame_count > 0 else 0
-            #     progress = (frame_count / total_frames) * 100
-            #     print(f"Progresso: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
-            #           f"FPS médio: {avg_fps:.2f} | ETA: {eta:.1f}s")
-    except KeyboardInterrupt:
+        except KeyboardInterrupt:
         stop_event.set()
         print("\nProcessing interrupted by user")
     

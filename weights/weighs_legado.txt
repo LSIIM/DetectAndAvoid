@@ -1,0 +1,5 @@
+Vamos manter no git apenas os pesos dos modelos do novo fluxo.
+
+Se quiser buscar algum modelo legado, acesse:
+
+https://drive.google.com/drive/folders/1X8dic2FqHTegCNua1iArZlUnvDMAvLQC
