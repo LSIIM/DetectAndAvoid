@@ -20,14 +20,12 @@ import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-from Yolo.Yolo11.modules.yolo_module import YOLODetector
-from module.sky_seg_module import SkySegmentation
-from zip_depth.zip_depth_module import ZipDepth
-from OpticalFlow import opticalflow as optical_flow
+from modules.YOLO.yolo_module import YOLODetector
+from modules.depth.zip_depth_module import ZipDepth
+from modules.Optical_Flow import opticalflow as optical_flow
 
 YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
-HORIZON_MODEL_PATH = r"Weights/skyseg_fp16.onnx"
-ZIPDEPTH_ENGINE_PATH = r"zip_depth/zipdepth_base_384x384_fp16.trt"
+ZIPDEPTH_ENGINE_PATH = r"weights/zipdepth_base_384x384_fp16.trt"
 
 
 def parse_arguments():
@@ -40,8 +38,6 @@ def parse_arguments():
     parser.add_argument("--output", help="Output video path (optional)")
     parser.add_argument("--resize-height", type=int, default=480, help="Resize frame height (default: 480)")
     parser.add_argument("--yolo-model-path", type=str, default=YOLO_MODEL_PATH, help="Path to YOLO model weights")
-    # parser.add_argument("--horizon-model-path", type=str, default=HORIZON_MODEL_PATH, help="Path to Horizon model weights")
-    # parser.add_argument("--segmentation-update-interval", type=int, default=30, help="Segmentation update interval (default: 30)")
     parser.add_argument("--depth-model-path", type=str, default=ZIPDEPTH_ENGINE_PATH, help="Path to ZipDepth TensorRT engine")
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
 
@@ -210,14 +206,10 @@ def setup_video_writer(output_path, fps, width, height, bitrate=8_000_000):
 # ============================= CONFIGURAÇÕES =============================
 # Caminhos
 
-# USE_TENSORRT_SKYSEG = True
-
 TRACKER_CONFIG = "bytetrack.yaml"
 
 # Configurações de processamento
 YOLO_CONFIDENCE = 0.5
-# HORIZON_MODEL_INPUT_SIZE = (320, 320)
-# SEGMENTATION_UPDATE_INTERVAL = 30  # Atualiza segmentação a cada N frames
 
 # Configurações do sistema de alerta de aproximação
 TRAIL_LENGTH = 50
@@ -229,12 +221,6 @@ ALERT_BOX_COLOR = (0, 0, 0)  # fundo preto
 ALERT_FONT_SCALE = 1
 ALERT_THICKNESS = 2
 
-# Configurações de análise de direção do voo
-# SAMPLE_AREA_SIZE = 30  # Tamanho da área de amostragem no centro
-# SKY_UPPER_THRESHOLD = 0.75  # Limiar para detectar SUBINDO
-# SKY_LOWER_THRESHOLD = 0.25  # Limiar para detectar DESCENDO
-# BINARY_THRESHOLD = 128  # Limiar para binarização da máscara
-
 
 # ============================= FUNÇÕES DE PROCESSAMENTO PARALELO =============================
 def process_yolo_threaded(frame, yolo_detector):
@@ -244,14 +230,6 @@ def process_yolo_threaded(frame, yolo_detector):
     except Exception as e:
         print(f"Error in YOLO processing: {e}")
         return frame, False
-
-# def process_sky_threaded(frame, sky_segmentation):
-#     """Process sky segmentation in a separate thread"""
-#     try:
-#         return sky_segmentation.process_frame(frame)
-#     except Exception as e:
-#         print(f"Error in Sky Segmentation processing: {e}")
-#         return frame, "UNKNOWN", 0.0
 
 def process_depth_threaded(frame, zip_depth):
     """Process ZipDepth in a separate thread"""
@@ -418,7 +396,6 @@ def main():
     
     # Setup video writer (side-by-side: YOLO+flow | ZipDepth)
     writer = setup_video_writer(args.output, fps, processing_width * 2, processing_height)
-    # red_overlay = np.full_like(np.zeros((processing_height, processing_width, 3), dtype=np.uint8), (0, 0, 127))
 
     
     # Setup modules
@@ -445,34 +422,10 @@ def main():
             alert_font_scale=ALERT_FONT_SCALE,
             alert_thickness=ALERT_THICKNESS
         )
-<<<<<<< HEAD
         print("Setting up ZipDepth...")
         zip_depth = ZipDepth(
             model_path=args.depth_model_path
-=======
-        print("Setting up Sky Segmentation...")
-        sky_segmentation = SkySegmentation(
-            model_path=args.horizon_model_path,
-            input_size=HORIZON_MODEL_INPUT_SIZE,
-            update_interval=args.segmentation_update_interval,
-            sample_area_size=SAMPLE_AREA_SIZE,
-            sky_upper_threshold=SKY_UPPER_THRESHOLD,
-            sky_lower_threshold=SKY_LOWER_THRESHOLD,
-            binary_threshold=BINARY_THRESHOLD,
-            use_tensorrt=USE_TENSORRT_SKYSEG
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
         )
-        # print("Setting up Sky Segmentation...")
-        # sky_segmentation = SkySegmentation(
-        #     model_path=args.horizon_model_path,
-        #     input_size=HORIZON_MODEL_INPUT_SIZE,
-        #     update_interval=args.segmentation_update_interval,
-        #     sample_area_size=SAMPLE_AREA_SIZE,
-        #     sky_upper_threshold=SKY_UPPER_THRESHOLD,
-        #     sky_lower_threshold=SKY_LOWER_THRESHOLD,
-        #     binary_threshold=BINARY_THRESHOLD,
-        #     use_tensorrt=USE_TENSORRT_SKYSEG 
-        # )
         
         print("All modules setup successfully!")
         
@@ -562,13 +515,11 @@ def main():
 <<<<<<< HEAD
             # Shared buffer: workers do not write the color frame
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
-            # future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
 =======
             # Submit all processing tasks in parallel
             future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
-            #future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
             future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
 >>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
@@ -577,7 +528,6 @@ def main():
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
 <<<<<<< HEAD
             times_yolo.append(time.time() - t0)
-            # sky_result, sky_flight_status, sky_ratio = future_sky.result()
             t0 = time.time()
             depth_color = future_depth.result()
             times_depth.append(time.time() - t0)
@@ -585,7 +535,6 @@ def main():
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             times_flow.append(time.time() - t0)
 =======
-            # sky_result, sky_flight_status, sky_ratio = future_sky.result()
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
 >>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
@@ -594,16 +543,6 @@ def main():
             # Create combined display
             t0 = time.time()
             combined_frame = resized_frame.copy()
-
-            # sky_result in 50% alpha red in combined_frame
-<<<<<<< HEAD
-            # if sky_result is not None:
-=======
-            # if sky_result is not None and False:
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
-            #     alpha = 0.5
-            #     colored_region = cv2.addWeighted(combined_frame, 1 - alpha, red_overlay, alpha, 0)
-            #     combined_frame[sky_result == 255] = colored_region[sky_result == 255]
 
             # Draw yolo_result detections on combined_frame
             if yolo_result is not None:
