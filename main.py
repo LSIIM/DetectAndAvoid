@@ -24,7 +24,7 @@ from modules.YOLO.yolo_module import YOLODetector
 from modules.depth.zip_depth_module import ZipDepth
 from modules.Optical_Flow import opticalflow as optical_flow
 
-YOLO_MODEL_PATH = r"Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
+YOLO_MODEL_PATH = r"weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 ZIPDEPTH_ENGINE_PATH = r"weights/zipdepth_base_384x384_fp16.trt"
 
 
@@ -512,21 +512,14 @@ def main():
             frame_count, resized_frame = item
             frame_start_time = time.time()
             
-<<<<<<< HEAD
             # Shared buffer: workers do not write the color frame
             future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
             future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
-=======
-            # Submit all processing tasks in parallel
-            future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
-            future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
             # Wait for all results (parallel execution happens here)
             t0 = time.time()
             yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
-<<<<<<< HEAD
             times_yolo.append(time.time() - t0)
             t0 = time.time()
             depth_color = future_depth.result()
@@ -534,9 +527,6 @@ def main():
             t0 = time.time()
             flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
             times_flow.append(time.time() - t0)
-=======
-            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
->>>>>>> 9e85f966c9501cc0a2aa4d57d056c2a2f3733c03
             
             frame_processing_time = time.time() - frame_start_time
             
