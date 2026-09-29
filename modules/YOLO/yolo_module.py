@@ -21,6 +21,9 @@ class kalman_filter:
         self.prediction_horizon_sec = prediction_horizon_sec
         self.kalman_process_noise = process_noise
         self.kalman_measurement_noise = measurement_noise
+        self.tracks = {}
+        self._last_predict_ts = None
+        self.lost_after_frames = 5
 
     def _create_kalman_filter(self, center):
         """Cria um filtro com estado [x, y, vx, vy] para uma detecção."""
@@ -55,6 +58,124 @@ class kalman_filter:
         kalman.predict()
         kalman.correct(np.array([[center[0]], [center[1]]], dtype=np.float32))
         self.kalman_last_update[track_id] = timestamp
+
+    def _transition(self, kalman, dt):
+        kalman.transitionMatrix = np.array(
+            [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]],
+            dtype=np.float32,
+        )
+
+    def _predict_active(self, timestamp):
+        """Projeta todo track ativo. Não depende de haver detecção nova."""
+        if self._last_predict_ts is None:
+            dt = 1e-3
+        else:
+            dt = max(1e-3, min(timestamp - self._last_predict_ts, 1.0))
+        self._last_predict_ts = timestamp
+        for track_id, track in self.tracks.items():
+            kalman = self.kalman_filters[track_id]
+            self._transition(kalman, dt)
+            kalman.predict()
+            cx = float(kalman.statePre[0, 0])
+            cy = float(kalman.statePre[1, 0])
+            half_w = track["w"] / 2.0
+            half_h = track["h"] / 2.0
+            track["box"] = np.array(
+                [cx - half_w, cy - half_h, cx + half_w, cy + half_h],
+                dtype=np.float32,
+            )
+            track["status"] = "predicted"
+
+    def _correct_track(self, track_id, box):
+        center = self._box_center(box)
+        kalman = self.kalman_filters[track_id]
+        kalman.correct(np.array([[center[0]], [center[1]]], dtype=np.float32))
+        x1, y1, x2, y2 = [float(v) for v in box]
+        track = self.tracks[track_id]
+        track["w"] = max(1.0, x2 - x1)
+        track["h"] = max(1.0, y2 - y1)
+        track["box"] = np.array([x1, y1, x2, y2], dtype=np.float32)
+        track["frames_lost"] = 0
+        track["status"] = "updated"
+
+    def _set_detection(self, track_id, classe, confianca):
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+        if classe is not None:
+            track["classe"] = classe
+        if confianca is not None:
+            track["confianca"] = float(confianca)
+
+    def _spawn_track(self, track_id, box, timestamp):
+        center = self._box_center(box)
+        self.kalman_filters[track_id] = self._create_kalman_filter(center)
+        self.kalman_last_update[track_id] = timestamp
+        x1, y1, x2, y2 = [float(v) for v in box]
+        self.tracks[track_id] = {
+            "box": np.array([x1, y1, x2, y2], dtype=np.float32),
+            "w": max(1.0, x2 - x1),
+            "h": max(1.0, y2 - y1),
+            "frames_lost": 0,
+            "status": "updated",
+            "classe": None,
+            "confianca": None,
+        }
+
+    def _drop_track(self, track_id):
+        self.tracks.pop(track_id, None)
+        self.kalman_filters.pop(track_id, None)
+        self.kalman_last_update.pop(track_id, None)
+        self.predicted_positions.pop(track_id, None)
+
+    def _coast_unmatched(self, matched_ids):
+        """Tracks sem match há mais de 5 frames são removidos, não congelados."""
+        for track_id in list(self.tracks):
+            if track_id in matched_ids:
+                continue
+            self.tracks[track_id]["frames_lost"] += 1
+            self.tracks[track_id]["status"] = "predicted"
+            if self.tracks[track_id]["frames_lost"] > self.lost_after_frames:
+                self._drop_track(track_id)
+
+    def step(self, timestamp, measurement_boxes, assign_fn, classes=None, confidences=None):
+        """Predict em todo frame. Correct só quando measurement_boxes não é None."""
+        self._predict_active(timestamp)
+        matched_ids = set()
+        if measurement_boxes is not None and len(measurement_boxes) > 0:
+            tracked_objects = {
+                track_id: {
+                    "box": track["box"],
+                    "frames_lost": track["frames_lost"],
+                }
+                for track_id, track in self.tracks.items()
+            }
+            ids = assign_fn(measurement_boxes, tracked_objects, (0, 0), None, None)
+            for index, (box, track_id) in enumerate(zip(measurement_boxes, ids)):
+                if track_id not in self.tracks:
+                    self._spawn_track(track_id, box, timestamp)
+                else:
+                    self._correct_track(track_id, box)
+                classe = classes[index] if classes is not None and index < len(classes) else None
+                confianca = confidences[index] if confidences is not None and index < len(confidences) else None
+                self._set_detection(track_id, classe, confianca)
+                matched_ids.add(track_id)
+        if measurement_boxes is not None:
+            self._coast_unmatched(matched_ids)
+        else:
+            self._coast_unmatched(set())
+
+    def draw_tracks(self, frame):
+        """Verde: atualizado neste frame. Laranja: só previsto."""
+        for track_id, track in self.tracks.items():
+            x1, y1, x2, y2 = [int(round(v)) for v in track["box"]]
+            color = (0, 255, 0) if track["status"] == "updated" else (0, 165, 255)
+            cv.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv.putText(
+                frame, str(track_id), (x1, max(15, y1 - 6)),
+                cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
+            )
+        return frame
 
     def _predict_future_position(self, track_id, horizon_sec):
         """Retorna (x, y) do centro previsto após o horizonte informado."""
@@ -112,12 +233,14 @@ class kalman_filter:
         self.kalman_filters.clear()
         self.kalman_last_update.clear()
         self.predicted_positions.clear()
+        self.tracks.clear()
+        self._last_predict_ts = None
 
 
 class YOLODetector:
     """Classe responsável por detecção e tracking com YOLO"""
     
-    def __init__(self, model_path, tracker_config, confidence_threshold, 
+    def __init__(self, model_path, confidence_threshold, 
                  trail_length=50, approach_threshold=1.1, alert_duration=1.5,
                  no_det_reset_sec=1.5,
                  alert_message="# ALERTA: APROXIMACAO DETECTADA",
@@ -128,7 +251,6 @@ class YOLODetector:
         
         Args:
             model_path: Caminho para o modelo YOLO
-            tracker_config: Arquivo de configuração do tracker
             confidence_threshold: Limiar de confiança para detecções
             trail_length: Comprimento da trilha de tracking
             approach_threshold: Threshold para detectar aproximação (ex: 1.1 = 10% aumento)
@@ -163,7 +285,6 @@ class YOLODetector:
         except Exception as e:
             raise RuntimeError(f"Erro ao carregar modelo YOLO: {e}")
         
-        self.tracker_config = tracker_config
         self.confidence_threshold = confidence_threshold
         self.trail_length = trail_length
         
@@ -186,9 +307,8 @@ class YOLODetector:
         self._times_preprocess = []
         self._times_inference = []
         self._times_postprocess = []
-        self._times_track_total = []
+        self._times_predict_total = []
         self._times_post_loop = []
-    
     def _load_engine(self, model_path: str) -> YOLO:
         dummy = np.zeros((640, 640, 3), dtype=np.uint8)
         for task in ("segment","detect"):
@@ -209,38 +329,29 @@ class YOLODetector:
             frame: Frame BGR a ser processado
             
         Returns:
-            tuple: (boxes, confidences, ids, approach_detected)
-            tracked_objects: Estado das detecções anteriores, indexado pelo ID.
+            tuple: (boxes, confidences, classes, ids, approach_detected)
+            tracked_objects: Estado das detecções anteriores do associador, indexado pelo ID.
             box_offset: Deslocamento do recorte em relação ao frame completo.
         """
         frame_processed = frame.copy()
 
         t0 = time.time()
-        if tracked_objects is None:
-            results = self.model.track(
-                frame_processed,
-                persist=True,
-                tracker=self.tracker_config,
-                verbose=False,
-                conf=self.confidence_threshold
-            )
-        else:
-            results = self.model.predict(
-                frame_processed,
-                verbose=False,
-                conf=self.confidence_threshold,
-                device=self.device,
-                iou=0.13
-            )
-        track_dt = time.time() - t0
-        self._times_track_total.append(track_dt)
+        results = self.model.predict(
+            frame_processed,
+            verbose=False,
+            conf=self.confidence_threshold,
+            device=self.device,
+            iou=0.13
+        )
+        predict_dt = time.time() - t0
+        self._times_predict_total.append(predict_dt)
         if results and hasattr(results[0], "speed") and results[0].speed:
             spd = results[0].speed
             self._times_preprocess.append(float(spd.get("preprocess", 0.0)) / 1000.0)
             self._times_inference.append(float(spd.get("inference", 0.0)) / 1000.0)
             self._times_postprocess.append(float(spd.get("postprocess", 0.0)) / 1000.0)
         else:
-            self._times_inference.append(track_dt)
+            self._times_inference.append(predict_dt)
 
         t1 = time.time()
         approach_detected = False
@@ -248,6 +359,7 @@ class YOLODetector:
         now = time.time()
         boxes = np.empty((0, 4), dtype=int)
         confidences = np.empty(0, dtype=float)
+        classes = []
         ids = []
         
         has_detection = False
@@ -261,13 +373,11 @@ class YOLODetector:
                 confidences = results[0].boxes.conf.cpu().numpy()
             else:
                 confidences = np.zeros(len(boxes), dtype=float)
+
+            classes = self._detection_classes(results[0], len(boxes))
             
             if tracked_objects is not None:
                 ids = self._assign_track_ids(boxes, tracked_objects, box_offset, frame, last_frame)
-            elif results[0].boxes.id is not None:
-                ids = results[0].boxes.id.int().cpu().tolist()
-            else:
-                ids = list(range(len(boxes)))
 
             for box in boxes:
                 area = self._calculate_area(box)
@@ -289,7 +399,14 @@ class YOLODetector:
         #self._draw_alert(frame_processed)
 
         self._times_post_loop.append(time.time() - t1)
-        return boxes, confidences, ids, approach_detected
+        return boxes, confidences, classes, ids, approach_detected
+
+    def _detection_classes(self, result, count):
+        if count == 0 or result.boxes.cls is None:
+            return []
+        names = getattr(self.model, "names", None) or {}
+        class_ids = result.boxes.cls.cpu().numpy().astype(int)
+        return [names.get(int(class_id), int(class_id)) for class_id in class_ids]
 
     def _new_track_ids(self, count):
         """Gera IDs monotônicos para detecções sem estado de tracking."""
@@ -322,13 +439,9 @@ class YOLODetector:
             for previous_index, (_, old_box, frames_lost) in enumerate(previous):
                 if previous_index not in unmatched:
                     continue
-                frame_debug = frame.copy()
                 old_center = np.array(
                     [(old_box[0] + old_box[2]) / 2, (old_box[1] + old_box[3]) / 2]
                 )
-                cv.circle(frame_debug, (int(current_center[0]), int(current_center[1])), 5, (0, 255, 0), -1)
-                cv.circle(frame_debug, (int(old_center[0]), int(old_center[1])), 5, (0, 0, 255), -1)
-                
                 distance = float(np.linalg.norm(current_center - old_center))
                 diagonal = max(
                     current_diagonal,
@@ -346,13 +459,6 @@ class YOLODetector:
                         candidates.append((score, detection_index, previous_index))
                     else:
                         continue
-                        # text += (" - Rejeitado por score alto")
-                if last_frame is not None:
-                    continue
-                    cv.imshow("Last Frame", last_frame)
-                #cv.imshow("Debug", frame_debug)
-                #cv.waitKey(1)
-            # text += ("\n Sai")
 
         for _, detection_index, previous_index in sorted(candidates):
             if detection_index in assignments or previous_index not in unmatched:
@@ -444,10 +550,9 @@ class YOLODetector:
 if __name__ == "__main__":
     # Exemplo de uso do YOLODetector
     model_path = "Yolo/Yolo11/Weights/best_yolo26_drone_bird_aircraft_junho_2026.pt"  # Substitua pelo caminho do seu modelo
-    tracker_config = "bytetrack.yaml"  # Substitua pelo caminho do seu arquivo de configuração do tracker
     confidence_threshold = 0.5
 
-    detector = YOLODetector(model_path, tracker_config, confidence_threshold)
+    detector = YOLODetector(model_path, confidence_threshold)
     kalman = kalman_filter(process_noise=1e-2, measurement_noise=1e-1, prediction_horizon_sec=0.5)
 
     # create .log file to print confidences
@@ -476,7 +581,7 @@ if __name__ == "__main__":
         #Resize to 640 height, maintaining aspect ratio
         frame = cv.resize(frame, (new_width, new_height))
         # yolo_frame = frame[min_y:max_y, min_x:max_x]
-        boxes, confidences, ids, approach_detected = detector.process_frame(frame)
+        boxes, confidences, classes, ids, approach_detected = detector.process_frame(frame)
         # boxes = boxes + np.array([min_x, min_y, min_x, min_y])  # Ajusta as coordenadas para o frame original
         
         if len(boxes) > 0:

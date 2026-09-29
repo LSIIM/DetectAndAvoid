@@ -94,20 +94,50 @@ def postprocess(depth, original_shape, lut):
     return depth_color
 
 
+def extract_roi_depth(depth_output, roi_bbox, model_size, frame_width, frame_height):
+    """Máximo do mapa bruto dentro do bbox. Sem normalizar."""
+    if depth_output is None or frame_width <= 0 or frame_height <= 0:
+        return None
+    depth = np.asarray(depth_output)
+    if depth.ndim == 4:
+        depth = depth[0, 0]
+    elif depth.ndim == 3:
+        depth = depth[0]
+    sx = model_size / float(frame_width)
+    sy = model_size / float(frame_height)
+    x1 = int(np.floor(float(roi_bbox[0]) * sx))
+    y1 = int(np.floor(float(roi_bbox[1]) * sy))
+    x2 = int(np.ceil(float(roi_bbox[2]) * sx))
+    y2 = int(np.ceil(float(roi_bbox[3]) * sy))
+    x1 = max(0, min(model_size, x1))
+    y1 = max(0, min(model_size, y1))
+    x2 = max(0, min(model_size, x2))
+    y2 = max(0, min(model_size, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = depth[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    return float(crop.max())
+
+
 class ZipDepth:
     """ZipDepth estimator (TensorRT)."""
 
-    def __init__(self, model_path, input_size=INPUT_SIZE, warmup_iters=5):
+    def __init__(self, model_path, input_size=INPUT_SIZE, warmup_iters=5, visual=False):
         """
         Args:
             model_path: Path to TensorRT engine (.trt)
             input_size: Model input size (default 384)
             warmup_iters: Dummy inferences after load
+            visual: build the colormap LUT used by colorize()
         """
         self.input_size = input_size
-        self._lut = build_colormap_lut()
+        self.visual = visual
+        self._lut = build_colormap_lut() if visual else None
         self._times_infer = []
         self._times_postprocess = []
+        self._times_colorize = []
 
         cuda.init()
         self.cfx = cuda.Device(0).retain_primary_context()
@@ -131,7 +161,8 @@ class ZipDepth:
         Run depth inference on a BGR frame.
 
         Returns:
-            depth_color: BGR uint8 visualization, same HxW as input
+            depth_output: raw float32 map, shape (1, 1, model, model). A copy,
+            because the engine buffer is reused on the next infer.
         """
         self.cfx.push()
         try:
@@ -139,9 +170,15 @@ class ZipDepth:
             t0 = time.time()
             depth_output = self.engine.infer(inp)
             self._times_infer.append(time.time() - t0)
-            t0 = time.time()
-            depth_color = postprocess(depth_output, frame.shape[:2], self._lut)
-            self._times_postprocess.append(time.time() - t0)
-            return depth_color
+            return np.array(depth_output, copy=True)
         finally:
             self.cfx.pop()
+
+    def colorize(self, depth_output, original_shape):
+        """LUT colormap upsampled to the processed frame. Only when visual=True."""
+        if self._lut is None:
+            return None
+        t0 = time.time()
+        depth_color = postprocess(depth_output, original_shape, self._lut)
+        self._times_colorize.append(time.time() - t0)
+        return depth_color

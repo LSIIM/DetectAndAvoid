@@ -84,9 +84,7 @@ O valor de `track_id` deve seguir estas regras:
 - Deve ser único para cada objeto detectado no momento atual.
 - Deve permanecer o mesmo para o mesmo objeto enquanto ele continuar visível.
 - Não deve ser reutilizado para outro objeto antes que o anterior seja descartado ou perdido.
-- Em geral, a melhor origem do `track_id` é a própria saída do YOLO (`results[0].boxes.id`), quando houver tracking interno habilitado.
-
-Se o YOLO não entregar `boxes.id`, o código pode gerar IDs locais usando a lógica de associação dos boxe anteriores e da última detecção. Nesse caso, o fluxo esperado é:
+O `track_id` vem do associador próprio (`_assign_track_ids` / `_new_track_ids`) quando `process_frame` recebe `tracked_objects`. A inferência usa `model.predict()` e devolve bbox, classe e confiança. O fluxo do associador é:
 
 1. Comparar detecção atual com a última detecção conhecida.
 2. Usar IoU/distância para associar o objeto ao mesmo `track_id` anterior.
@@ -99,7 +97,7 @@ O uso correto do filtro é feito juntos com os IDs de detecção e as coordenada
 ```python
 kalman = kalman_filter(process_noise=1e-2, measurement_noise=1e-1, prediction_horizon_sec=0.5)
 
-boxes, confidences, ids, approach_detected = detector.process_frame(frame)
+boxes, confidences, classes, ids, approach_detected = detector.process_frame(frame)
 future_centers = kalman.process_kalman(ids, boxes, time.time())
 
 for track_id in ids:
@@ -126,14 +124,11 @@ Se dois objetos diferentes compartilharem o mesmo ID, ou se o mesmo objeto receb
 
 Em resumo: o filtro depende diretamente da continuidade do identificador. O `track_id` deve representar a mesma entidade ao longo do tempo.
 
-### 4.4) Relação com o tracking do YOLO
+### 4.4) Origem do `track_id`
 
-No código do projeto, há dois cenários:
+`model.predict()` não devolve ID. O `track_id` só aparece quando `process_frame` recebe `tracked_objects`: aí `_assign_track_ids(...)` associa a detecção atual à caixa anterior, ou `_new_track_ids` cria um ID novo. Sem `tracked_objects`, a lista `ids` volta vazia.
 
-- `results[0].boxes.id is not None`: o YOLO já fornece o tracking, então o `track_id` deve ser reaproveitado diretamente.
-- `results[0].boxes.id is None`: o código usa `_assign_track_ids(...)` para inferir associação entre detecções novas e antigas.
-
-Em ambos os casos, a regra principal é a mesma: um objeto deve manter um único `track_id` enquanto continuar presente na cena.
+Um objeto deve manter um único `track_id` enquanto continuar presente na cena.
 
 ### 4.5) Como usar `tracked_objects`
 
@@ -166,7 +161,7 @@ Em outras palavras, `tracked_objects` é o histórico de associação da última
 Exemplo de uso:
 
 ```python
-boxes, confidences, ids, approach_detected = detector.process_frame(
+boxes, confidences, classes, ids, approach_detected = detector.process_frame(
     frame,
     tracked_objects=tracked_objects,
     box_offset=(0, 0),

@@ -10,6 +10,8 @@ Usage:
 """
 
 import argparse
+from collections import deque
+import json
 import os
 import queue
 import subprocess
@@ -19,10 +21,10 @@ import time
 import cv2
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-from modules.YOLO.yolo_module import YOLODetector
-from modules.depth.zip_depth_module import ZipDepth
-from modules.Optical_Flow import opticalflow as optical_flow
+from modules.YOLO.yolo_module import YOLODetector, kalman_filter
+from modules.depth.zip_depth_module import ZipDepth, extract_roi_depth
+# from modules.Optical_Flow import opticalflow as optical_flow
+from modules.Optical_Flow.opticalflow_roi import RoiPointTracker
 
 YOLO_MODEL_PATH = r"weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 ZIPDEPTH_ENGINE_PATH = r"weights/zipdepth_base_384x384_fp16.trt"
@@ -40,6 +42,8 @@ def parse_arguments():
     parser.add_argument("--yolo-model-path", type=str, default=YOLO_MODEL_PATH, help="Path to YOLO model weights")
     parser.add_argument("--depth-model-path", type=str, default=ZIPDEPTH_ENGINE_PATH, help="Path to ZipDepth TensorRT engine")
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
+    parser.add_argument("--visual-depth", action="store_true", help="Colorize depth and write the side-by-side debug video")
+    parser.add_argument("--verbose", action="store_true", help="Print per-frame JSON and latency breakdowns")
 
     return parser.parse_args()
 
@@ -206,8 +210,6 @@ def setup_video_writer(output_path, fps, width, height, bitrate=8_000_000):
 # ============================= CONFIGURAÇÕES =============================
 # Caminhos
 
-TRACKER_CONFIG = "bytetrack.yaml"
-
 # Configurações de processamento
 YOLO_CONFIDENCE = 0.5
 
@@ -223,13 +225,100 @@ ALERT_THICKNESS = 2
 
 
 # ============================= FUNÇÕES DE PROCESSAMENTO PARALELO =============================
-def process_yolo_threaded(frame, yolo_detector):
-    """Process YOLO detection in a separate thread"""
+class LatestFrame:
+    """Guarda só o frame mais recente. A publicação substitui o anterior."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._seq = 0
+        self._frame = None
+        self._ts = None
+
+    def publish(self, frame, frame_ts):
+        with self._cv:
+            self._seq += 1
+            self._frame = frame
+            self._ts = frame_ts
+            self._cv.notify()
+
+    def wait_newer(self, last_seq, timeout):
+        with self._cv:
+            if self._frame is None or self._seq == last_seq:
+                self._cv.wait(timeout)
+            if self._frame is None or self._seq == last_seq:
+                return None
+            return self._frame.copy(), self._ts, self._seq
+
+    def wake(self):
+        with self._cv:
+            self._cv.notify_all()
+
+
+class LatestDetection:
+    """Última detecção publicada. A leitura não bloqueia."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = None
+        self.count = 0
+
+    def publish(self, boxes, confidences, classes, ids, approach, frame_ts):
+        with self._lock:
+            self._value = (boxes, confidences, classes, ids, approach, frame_ts)
+            self.count += 1
+
+    def read(self):
+        with self._lock:
+            return self._value
+
+    def completed(self):
+        with self._lock:
+            return self.count
+
+
+def _enqueue_latest(record_q, packet):
+    """Enfileira sem bloquear. Se a fila enche, descarta o pacote mais antigo."""
     try:
-        return yolo_detector.process_frame(frame)
-    except Exception as e:
-        print(f"Error in YOLO processing: {e}")
-        return frame, False
+        record_q.put_nowait(packet)
+        return
+    except queue.Full:
+        pass
+    try:
+        record_q.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        record_q.put_nowait(packet)
+    except queue.Full:
+        pass
+
+
+def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color):
+    combined = frame_bgr.copy()
+    for track in tracks:
+        x1, y1, x2, y2 = [int(round(v)) for v in track["box"]]
+        color = (0, 255, 0) if track["status"] == "updated" else (0, 165, 255)
+        cv2.rectangle(combined, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            combined, str(track["track_id"]), (x1, max(0, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+        )
+        dx = track.get("dx") or 0.0
+        dy = track.get("dy") or 0.0
+        cx = int(round(track["cx"]))
+        cy = int(round(track["cy"]))
+        cv2.circle(combined, (cx, cy), 5, (0, 0, 0), -1)
+        cv2.arrowedLine(
+            combined, (cx, cy),
+            (int(round(cx + dx * fps)), int(round(cy + dy * fps))),
+            (0, 0, 0), 2, tipLength=0.2,
+        )
+    cv2.putText(combined, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(combined, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+    if depth_color is None:
+        return combined
+    return np.hstack([combined, depth_color])
+
 
 def process_depth_threaded(frame, zip_depth):
     """Process ZipDepth in a separate thread"""
@@ -245,6 +334,56 @@ def process_flow_threaded(frame, flow_context):
     except Exception as e:
         print(f"Error in Optical Flow processing: {e}")
         return frame, False   
+def _print_breakdown(
+    times_capture,
+    times_resize,
+    times_queue_wait,
+    times_depth,
+    times_flow_roi,
+    times_combine,
+    times_write,
+    zip_depth=None,
+    flow_context=None,
+    yolo_detector=None,
+    main_fps=None,
+    yolo_fps=None,
+    detection_ages=None,
+):
+    def _line(label, xs):
+        if not xs:
+            return
+        print(f"{label:22s} {np.mean(xs) * 1000:6.2f} ms/frame")
+
+    print("\n--- Breakdown médio por etapa ---")
+    _line("Capture:", times_capture)
+    _line("Resize (CPU shared):", times_resize)
+    _line("Queue wait:", times_queue_wait)
+    _line("Depth (wait result):", times_depth)
+    _line("Flow ROI:", times_flow_roi)
+    _line("Combine:", times_combine)
+    _line("Write:", times_write)
+    if yolo_detector is not None:
+        _line("YOLO preprocess:", getattr(yolo_detector, "_times_preprocess", None))
+        _line("YOLO inference:", getattr(yolo_detector, "_times_inference", None))
+        _line("YOLO postprocess:", getattr(yolo_detector, "_times_postprocess", None))
+        _line("YOLO predict() total:", getattr(yolo_detector, "_times_predict_total", None))
+        _line("YOLO post loop:", getattr(yolo_detector, "_times_post_loop", None))
+    if zip_depth is not None:
+        _line("Depth infer:", getattr(zip_depth, "_times_infer", None))
+        _line("Depth postprocess:", getattr(zip_depth, "_times_postprocess", None))
+        _line("Depth colorize:", getattr(zip_depth, "_times_colorize", None))
+    if main_fps is not None:
+        print(f"{'Main FPS:':22s} {main_fps:6.2f}")
+    if yolo_fps is not None:
+        print(f"{'YOLO FPS:':22s} {yolo_fps:6.2f}")
+    if detection_ages:
+        print(
+            f"{'Det age ms:':22s} "
+            f"mean {np.mean(detection_ages):6.1f}  "
+            f"min {np.min(detection_ages):6.1f}  "
+            f"max {np.max(detection_ages):6.1f}"
+        )
+
 
 def min_wind(roi, min_size, max_width, max_height):
     """Ensure the ROI has a minimum size and is within bounds"""
@@ -393,8 +532,8 @@ def main():
     print(f"Display: {'off' if args.no_display else 'on'}")
     print(f"FPS: {fps}")
     
-    # Setup video writer (side-by-side: YOLO+flow | ZipDepth)
-    writer = setup_video_writer(args.output, fps, processing_width * 2, processing_height)
+    out_width = processing_width * 2 if args.visual_depth else processing_width
+    writer = setup_video_writer(args.output, fps, out_width, processing_height)
 
     
     # Setup modules
@@ -403,14 +542,11 @@ def main():
     try:        
         # Optical Flow setup
         print("Setting up Optical Flow...")
-        flow_context = optical_flow.setup(
-            max_point=40,
-            number_clusters=args.clusters
-        )
+        flow_context = None
         print("Setting up YOLO detector...")
+        tracker = kalman_filter()
         yolo_detector = YOLODetector(
             model_path=args.yolo_model_path,
-            tracker_config=TRACKER_CONFIG,
             confidence_threshold=YOLO_CONFIDENCE,
             trail_length=TRAIL_LENGTH,
             approach_threshold=APPROACH_AREA_INCREASE_THRESHOLD,
@@ -423,7 +559,8 @@ def main():
         )
         print("Setting up ZipDepth...")
         zip_depth = ZipDepth(
-            model_path=args.depth_model_path
+            model_path=args.depth_model_path,
+            visual=args.visual_depth,
         )
         
         print("All modules setup successfully!")
@@ -435,26 +572,67 @@ def main():
             writer.release()
         return 1
     
-    # Use 3 threads for 3 modules (optimal for Jetson Orin NX with 8 cores)
-    executor = ThreadPoolExecutor(max_workers=3)
+    # Depth na pool. YOLO e flow têm thread própria.
+    executor = ThreadPoolExecutor(max_workers=1)
     
     # Main processing loop
     print("\n--- Starting video processing ---")
-    print("Using parallel processing with 3 threads + capture producer")
+    print("Using capture + YOLO thread + flow thread + depth + record")
+    record_q = queue.Queue(maxsize=8)
+
+    def record_worker():
+        log_file = open("tracks.jsonl", "w", encoding="utf-8")
+        try:
+            while True:
+                packet = record_q.get()
+                if packet is None:
+                    break
+                log_file.write(json.dumps(packet["log"]) + "\n")
+                log_file.flush()
+                frame = packet.get("frame")
+                if writer is None or frame is None:
+                    continue
+                depth_color = None
+                if args.visual_depth and packet.get("depth") is not None:
+                    depth_color = zip_depth.colorize(packet["depth"], frame.shape[:2])
+                display = _render_record_frame(
+                    frame, packet["tracks"], fps, packet["info_text"], depth_color,
+                )
+                if packet["frame_count"] % 30 == 0:
+                    cv2.imwrite(
+                        f"audit_tracks/frame_{packet['frame_count']:06d}.jpg",
+                        display if depth_color is None else display[:, : frame.shape[1]],
+                    )
+                writer.write(display)
+        finally:
+            log_file.close()
+            if writer:
+                writer.release()
+
+    record_thread = threading.Thread(target=record_worker, daemon=True)
+    record_thread.start()
     frame_count = 0
     total_processing_start_time = time.time()
     times_capture = []
     times_resize = []
     times_queue_wait = []
-    times_yolo = []
     times_depth = []
-    times_flow = []
+    times_flow_roi = []
     times_combine = []
     times_write = []
 
     SENTINEL = None
     frame_q = queue.Queue(maxsize=2)
     stop_event = threading.Event()
+    latest_frame = LatestFrame()
+    latest_det = LatestDetection()
+    detection_ages = []
+    last_det_ts = None
+    prev_gray = None
+    prev_depth = {}
+    depth_window = 8
+    flow_jobs = queue.Queue()
+    os.makedirs("audit_tracks", exist_ok=True)
 
     def _put_frame(item):
         while True:
@@ -480,6 +658,7 @@ def main():
             while not stop_event.is_set():
                 t0 = time.time()
                 ret, frame = cap.read()
+                frame_ts = t0
                 capture_dt = time.time() - t0
                 if not ret:
                     print(f"Capture ended (ret=False) after {frame_id} frames")
@@ -493,13 +672,46 @@ def main():
                     resized_frame = cv2.resize(frame, (processing_width, processing_height))
                     times_resize.append(time.time() - t0)
                 frame_id += 1
-                if not _put_frame((frame_id, resized_frame)):
+                if not _put_frame((frame_id, resized_frame, frame_ts)):
                     break
         finally:
             _put_frame(SENTINEL)
 
+    def yolo_worker():
+        last_seq = 0
+        while not stop_event.is_set():
+            item = latest_frame.wait_newer(last_seq, 0.2)
+            if item is None:
+                continue
+            frame, det_frame_ts, seq = item
+            last_seq = seq
+            try:
+                boxes, confidences, classes, ids, approach = yolo_detector.process_frame(frame)
+            except Exception as e:
+                print(f"Error in YOLO processing: {e}")
+                continue
+            latest_det.publish(boxes, confidences, classes, ids, approach, det_frame_ts)
+
+    def flow_worker():
+        roi_flow = RoiPointTracker()
+        while True:
+            job = flow_jobs.get()
+            if job is None:
+                break
+            items, prev, curr, reply = job
+            try:
+                results, elapsed = roi_flow.step(items, prev, curr)
+            except Exception as e:
+                print(f"Error in Optical Flow processing: {e}")
+                results, elapsed = [], 0.0
+            reply.put((results, elapsed))
+
     capture_thread = threading.Thread(target=capture_worker, name="capture", daemon=True)
     capture_thread.start()
+    yolo_thread = threading.Thread(target=yolo_worker, name="yolo", daemon=True)
+    yolo_thread.start()
+    flow_thread = threading.Thread(target=flow_worker, name="flow", daemon=True)
+    flow_thread.start()
     
     try:
         while True:
@@ -508,25 +720,81 @@ def main():
             times_queue_wait.append(time.time() - t0)
             if item is SENTINEL:
                 break
-            frame_count, resized_frame = item
+            frame_count, resized_frame, frame_ts = item
             frame_start_time = time.time()
+            latest_frame.publish(resized_frame, frame_ts)
+
+            snapshot = latest_det.read()
+            yolo_result = None
+            yolo_confidence = None
+            yolo_ids = []
+            det_ts = None
+            if snapshot is not None:
+                yolo_result, yolo_confidence, yolo_classes, yolo_ids, yolo_approach_detected, det_ts = snapshot
+                age_ms = (frame_ts - det_ts) * 1000.0
+                detection_ages.append(age_ms)
+
+            measurement_boxes = None
+            if det_ts is not None and det_ts != last_det_ts:
+                last_det_ts = det_ts
+                measurement_boxes = yolo_result if yolo_result is not None else np.empty((0, 4), dtype=int)
+                meas_classes = yolo_classes
+                meas_conf = yolo_confidence
+            else:
+                meas_classes = None
+                meas_conf = None
+            tracker.step(
+                frame_ts, measurement_boxes, yolo_detector._assign_track_ids,
+                meas_classes, meas_conf,
+            )
             
+            curr_gray = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+            flow_items = [
+                (track_id, track["box"]) for track_id, track in tracker.tracks.items()
+            ]
+            flow_reply = queue.Queue(maxsize=1)
+            flow_jobs.put((flow_items, prev_gray, curr_gray, flow_reply))
+
             # Shared buffer: workers do not write the color frame
-            future_yolo = executor.submit(process_yolo_threaded, resized_frame, yolo_detector)
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
-            future_flow = executor.submit(process_flow_threaded, resized_frame, flow_context)
             
-            # Wait for all results (parallel execution happens here)
             t0 = time.time()
-            yolo_result, yolo_confidence, yolo_ids, yolo_approach_detected = future_yolo.result()
-            times_yolo.append(time.time() - t0)
-            t0 = time.time()
-            depth_color = future_depth.result()
+            depth_output = future_depth.result()
             times_depth.append(time.time() - t0)
             t0 = time.time()
-            flow_new, flow_ids, flow_uvs, flow_duvs = future_flow.result()
-            times_flow.append(time.time() - t0)
-            
+            active_ids = set(tracker.tracks)
+            depth_stats = {}
+            for track_id, track in tracker.tracks.items():
+                if depth_output is None:
+                    continue
+                s_t = extract_roi_depth(
+                    depth_output,
+                    track["box"],
+                    zip_depth.input_size,
+                    processing_width,
+                    processing_height,
+                )
+                if s_t is None:
+                    continue
+                history = prev_depth.setdefault(track_id, deque(maxlen=depth_window))
+                history.append((s_t, frame_ts))
+                level = float(np.median([sample for sample, _ts in history]))
+                if len(history) < depth_window:
+                    depth_stats[track_id] = (level, None)
+                else:
+                    half = depth_window // 2
+                    older = [sample for sample, _ts in list(history)[:half]]
+                    newer = [sample for sample, _ts in list(history)[half:]]
+                    delta_s = float(np.median(newer) - np.median(older))
+                    depth_stats[track_id] = (level, delta_s)
+            for track_id in list(prev_depth):
+                if track_id not in active_ids:
+                    del prev_depth[track_id]
+            zip_depth._times_postprocess.append(time.time() - t0)
+            flow_results, flow_dt = flow_reply.get()
+            times_flow_roi.append(flow_dt)
+            prev_gray = curr_gray
+
             frame_processing_time = time.time() - frame_start_time
             
             # Create combined display
@@ -557,24 +825,61 @@ def main():
             combined_frame = cv2.arrowedLine(combined_frame, (int(processing_width/2), int(processing_height/2)), (int(processing_width/2 + vetor[0]), int(processing_height/2 + vetor[1])), (80,120,80), 3, tipLength=0.2)
 
             # Add frame info with processing time
+            flow_by_id = {
+                track_id: (dx, dy) for track_id, dx, dy, _magnitude, _angle in flow_results
+            }
+            log_tracks = []
+            draw_tracks = []
+            for track_id, track in tracker.tracks.items():
+                kalman = tracker.kalman_filters[track_id]
+                state = kalman.statePost if track["status"] == "updated" else kalman.statePre
+                cx = float(state[0, 0])
+                cy = float(state[1, 0])
+                vx = float(state[2, 0])
+                vy = float(state[3, 0])
+                level, delta_s = depth_stats.get(track_id, (None, None))
+                dx, dy = flow_by_id.get(track_id, (0.0, 0.0))
+                log_tracks.append({
+                    "track_id": int(track_id),
+                    "classe": track.get("classe"),
+                    "confianca": track.get("confianca"),
+                    "cx": cx,
+                    "cy": cy,
+                    "vx": vx,
+                    "vy": vy,
+                    "S": level,
+                    "deltaS": delta_s,
+                    "timestamp": frame_ts,
+                })
+                draw_tracks.append({
+                    "track_id": int(track_id),
+                    "box": [float(v) for v in track["box"]],
+                    "status": track["status"],
+                    "cx": cx,
+                    "cy": cy,
+                    "dx": dx,
+                    "dy": dy,
+                })
             info_text = f"Frame: {frame_count} | YOLO | ZipDepth | Optical Flow | {frame_processing_time*1000:.1f}ms"
-            cv2.putText(combined_frame, info_text, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(combined_frame, info_text, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-            
-            display = np.hstack([combined_frame, depth_color])
-            times_combine.append(time.time() - t0)
+            packet = {
+                "log": {"frame": frame_count, "timestamp": frame_ts, "tracks": log_tracks},
+                "frame_count": frame_count,
+                "info_text": info_text,
+                "tracks": draw_tracks,
+                "frame": resized_frame.copy() if writer or not args.no_display else None,
+                "depth": depth_output if args.visual_depth else None,
+            }
+            if args.verbose:
+                print(json.dumps(packet["log"]))
+            t0 = time.time()
+            _enqueue_latest(record_q, packet)
+            times_write.append(time.time() - t0)
+            times_combine.append(0.0)
 
-            # Write frame if output is specified
-            if writer:
-                t0 = time.time()
-                writer.write(display)
-                times_write.append(time.time() - t0)
-            else:
-                times_write.append(0.0)
-            
-            if not args.no_display:
+            if not args.no_display and packet["frame"] is not None:
+                display = _render_record_frame(
+                    packet["frame"], draw_tracks, fps, info_text, None,
+                )
                 cv2.imshow("DetectAndAvoid - YOLO | Optical Flow | ZipDepth", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27 or key == ord('q'):
@@ -585,20 +890,23 @@ def main():
                     print(f"Saved frame {frame_count}")
             
             # Print progress every 100 frames
-            if frame_count % 100 == 0:
+            if args.verbose and frame_count % 100 == 0:
                 print(f"Processed {frame_count} frames...")
+                elapsed = time.time() - total_processing_start_time
                 _print_breakdown(
                     times_capture,
                     times_resize,
                     times_queue_wait,
-                    times_yolo,
                     times_depth,
-                    times_flow,
+                    times_flow_roi,
                     times_combine,
                     times_write,
                     zip_depth,
                     flow_context,
                     yolo_detector,
+                    main_fps=(frame_count / elapsed) if elapsed > 0 else 0.0,
+                    yolo_fps=(latest_det.completed() / elapsed) if elapsed > 0 else 0.0,
+                    detection_ages=detection_ages,
                 )
         except KeyboardInterrupt:
         stop_event.set()
@@ -610,41 +918,46 @@ def main():
     
     finally:
         stop_event.set()
+        latest_frame.wake()
+        flow_jobs.put(None)
+        record_q.put(None)
         capture_thread.join(timeout=2.0)
+        yolo_thread.join(timeout=2.0)
+        flow_thread.join(timeout=2.0)
+        record_thread.join(timeout=5.0)
         executor.shutdown(wait=True)
         
         # Cleanup
         total_time = time.time() - total_processing_start_time
         avg_fps = frame_count / total_time if total_time > 0 else 0
+        yolo_fps = latest_det.completed() / total_time if total_time > 0 else 0
         
-        print(f"\n--- Processing completed ---")
-        print(f"Total frames processed: {frame_count}")
-        print(f"Total time: {total_time:.2f}s")
-        print(f"Average FPS: {avg_fps:.2f}")
-        _print_breakdown(
-            times_capture,
-            times_resize,
-            times_queue_wait,
-            times_yolo,
-            times_depth,
-            times_flow,
-            times_combine,
-            times_write,
-            zip_depth,
-            flow_context,
-            yolo_detector,
-        )
+        if args.verbose:
+            print(f"\n--- Processing completed ---")
+            print(f"Total frames processed: {frame_count}")
+            print(f"Total time: {total_time:.2f}s")
+            print(f"Average FPS: {avg_fps:.2f}")
+            _print_breakdown(
+                times_capture,
+                times_resize,
+                times_queue_wait,
+                times_depth,
+                times_flow_roi,
+                times_combine,
+                times_write,
+                zip_depth,
+                flow_context,
+                yolo_detector,
+                main_fps=avg_fps,
+                yolo_fps=yolo_fps,
+                detection_ages=detection_ages,
+            )
         
         cap.release()
-        if writer:
-            writer.release()
         cv2.destroyAllWindows()
         
         # Cleanup modules
-        try:
-            optical_flow.cleanup(flow_context)
-        except:
-            pass
+        # optical_flow.cleanup(flow_context)
     
     return 0
 
