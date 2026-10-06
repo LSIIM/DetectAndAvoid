@@ -284,7 +284,7 @@ def main():
             
             # Submit all processing tasks in parallel
             future_yolo = executor.submit(process_yolo_threaded, resized_frame.copy(), yolo_detector)
-            future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
+            #future_sky = executor.submit(process_sky_threaded, resized_frame.copy(), sky_segmentation)
             future_flow = executor.submit(process_flow_threaded, resized_frame.copy(), flow_context)
             
             # Wait for all results (parallel execution happens here)
