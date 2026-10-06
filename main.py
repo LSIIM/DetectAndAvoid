@@ -877,8 +877,11 @@ def main():
             times_combine.append(0.0)
 
             if not args.no_display and packet["frame"] is not None:
+                depth_color = None
+                if args.visual_depth and depth_output is not None:
+                    depth_color = zip_depth.colorize(depth_output, packet["frame"].shape[:2])
                 display = _render_record_frame(
-                    packet["frame"], draw_tracks, fps, info_text, None,
+                    packet["frame"], draw_tracks, fps, info_text, depth_color,
                 )
                 cv2.imshow("DetectAndAvoid - YOLO | Optical Flow | ZipDepth", display)
                 key = cv2.waitKey(1) & 0xFF
