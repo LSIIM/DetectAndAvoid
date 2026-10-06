@@ -328,12 +328,6 @@ def process_depth_threaded(frame, zip_depth):
         print(f"Error in ZipDepth processing: {e}")
         return np.zeros_like(frame)
 
-def process_flow_threaded(frame, flow_context):
-    try:
-        return optical_flow.process_frame(frame, flow_context)  
-    except Exception as e:
-        print(f"Error in Optical Flow processing: {e}")
-        return frame, False   
 def _print_breakdown(
     times_capture,
     times_resize,
@@ -426,47 +420,6 @@ def boxes_roi(boxes, min_size, max_width, max_height):
         max_width,
         max_height,
     )
-
-def _print_breakdown(
-    times_capture,
-    times_resize,
-    times_queue_wait,
-    times_yolo,
-    times_depth,
-    times_flow,
-    times_combine,
-    times_write,
-    zip_depth=None,
-    flow_context=None,
-    yolo_detector=None,
-):
-    def _line(label, xs):
-        if not xs:
-            return
-        print(f"{label:22s} {np.mean(xs) * 1000:6.2f} ms/frame")
-
-    print("\n--- Breakdown médio por etapa ---")
-    _line("Capture:", times_capture)
-    _line("Resize (CPU shared):", times_resize)
-    _line("Queue wait:", times_queue_wait)
-    _line("YOLO (wait result):", times_yolo)
-    _line("Depth (wait result):", times_depth)
-    _line("Flow (wait result):", times_flow)
-    _line("Combine:", times_combine)
-    _line("Write:", times_write)
-    if yolo_detector is not None:
-        _line("YOLO preprocess:", getattr(yolo_detector, "_times_preprocess", None))
-        _line("YOLO inference:", getattr(yolo_detector, "_times_inference", None))
-        _line("YOLO postprocess:", getattr(yolo_detector, "_times_postprocess", None))
-        _line("YOLO track() total:", getattr(yolo_detector, "_times_track_total", None))
-        _line("YOLO post loop:", getattr(yolo_detector, "_times_post_loop", None))
-    if zip_depth is not None:
-        _line("Depth infer:", getattr(zip_depth, "_times_infer", None))
-        _line("Depth postprocess:", getattr(zip_depth, "_times_postprocess", None))
-    if flow_context is not None:
-        _line("Flow LK:", getattr(flow_context, "_times_lk", None))
-        _line("Flow rest:", getattr(flow_context, "_times_rest", None))
-
 
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
@@ -796,35 +749,6 @@ def main():
             prev_gray = curr_gray
 
             frame_processing_time = time.time() - frame_start_time
-            
-            # Create combined display
-            t0 = time.time()
-            combined_frame = resized_frame.copy()
-
-            # Draw yolo_result detections on combined_frame
-            if yolo_result is not None:
-                combined_frame = yolo_detector.draw_detections(combined_frame, yolo_result, yolo_confidence, yolo_ids)
-
-            # Draw optical flow on combined_frame
-            vetor = [0,0]
-            for i, pid in enumerate(flow_ids) if flow_new is not None else []:
-                new = flow_new[i]
-                vetor += flow_uvs[i]
-                a, b = int(new[0]), int(new[1])
-                u, v = flow_uvs[i] * fps
-
-                # Draw arrow for optical flow
-                combined_frame = cv2.circle(combined_frame, (a, b), 5, flow_context.colors[0], -1)
-                combined_frame = cv2.arrowedLine(combined_frame, (a, b), (int(a + u), int(b + v)), flow_context.colors[1], 2, tipLength=0.2)
-
-            if flow_new is not None:
-                vetor/len(flow_ids)
-                vetor * fps
-
-            combined_frame = cv2.circle(combined_frame, (int(processing_width/2), int(processing_height/2)), 8, (40,40,40), -1)
-            combined_frame = cv2.arrowedLine(combined_frame, (int(processing_width/2), int(processing_height/2)), (int(processing_width/2 + vetor[0]), int(processing_height/2 + vetor[1])), (80,120,80), 3, tipLength=0.2)
-
-            # Add frame info with processing time
             flow_by_id = {
                 track_id: (dx, dy) for track_id, dx, dy, _magnitude, _angle in flow_results
             }
@@ -911,7 +835,17 @@ def main():
                     yolo_fps=(latest_det.completed() / elapsed) if elapsed > 0 else 0.0,
                     detection_ages=detection_ages,
                 )
-        except KeyboardInterrupt:
+        
+            
+            # Atualizar progresso
+            # if frame_count % 30 == 0:
+            #     elapsed_time = time.time() - total_processing_start_time
+            #     avg_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+            #     eta = ((elapsed_time / frame_count) * (total_frames - frame_count)) if frame_count > 0 else 0
+            #     progress = (frame_count / total_frames) * 100
+            #     print(f"Progresso: {progress:.1f}% | Frame {frame_count}/{total_frames} | "
+            #           f"FPS médio: {avg_fps:.2f} | ETA: {eta:.1f}s")
+    except KeyboardInterrupt:
         stop_event.set()
         print("\nProcessing interrupted by user")
     
