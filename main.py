@@ -317,7 +317,16 @@ def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color):
     cv2.putText(combined, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
     if depth_color is None:
         return combined
-    return np.hstack([combined, depth_color])
+    depth_panel = depth_color.copy()
+    for track in tracks:
+        x1, y1, x2, y2 = [int(round(v)) for v in track["box"]]
+        color = (0, 255, 0) if track["status"] == "updated" else (0, 165, 255)
+        cv2.rectangle(depth_panel, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            depth_panel, str(track["track_id"]), (x1, max(0, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+        )
+    return np.hstack([combined, depth_panel])
 
 
 def process_depth_threaded(frame, zip_depth):
@@ -581,6 +590,7 @@ def main():
     latest_det = LatestDetection()
     detection_ages = []
     last_det_ts = None
+    last_flow_by_id = {}
     prev_gray = None
     prev_depth = {}
     depth_window = 8
@@ -688,17 +698,19 @@ def main():
                 detection_ages.append(age_ms)
 
             measurement_boxes = None
+            frames_em_atraso = 0.0
             if det_ts is not None and det_ts != last_det_ts:
                 last_det_ts = det_ts
                 measurement_boxes = yolo_result if yolo_result is not None else np.empty((0, 4), dtype=int)
                 meas_classes = yolo_classes
                 meas_conf = yolo_confidence
+                frames_em_atraso = max(0.0, (frame_ts - det_ts) * fps)
             else:
                 meas_classes = None
                 meas_conf = None
             tracker.step(
                 frame_ts, measurement_boxes, yolo_detector._assign_track_ids,
-                meas_classes, meas_conf,
+                meas_classes, meas_conf, last_flow_by_id, frames_em_atraso,
             )
             
             curr_gray = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
@@ -751,6 +763,11 @@ def main():
             frame_processing_time = time.time() - frame_start_time
             flow_by_id = {
                 track_id: (dx, dy) for track_id, dx, dy, _magnitude, _angle in flow_results
+            }
+            last_flow_by_id = {
+                track_id: flow_by_id[track_id]
+                for track_id in tracker.tracks
+                if track_id in flow_by_id
             }
             log_tracks = []
             draw_tracks = []

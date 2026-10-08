@@ -6,6 +6,14 @@ import numpy as np
 from ultralytics import YOLO
 from collections import deque
 
+def _advance_box(box, dx, dy, frames_em_atraso):
+    """Desloca a caixa do YOLO pelo flow do track vezes os frames de atraso."""
+    shifted = np.array(box, dtype=np.float32, copy=True)
+    if frames_em_atraso:
+        shifted[[0, 2]] += dx * frames_em_atraso
+        shifted[[1, 3]] += dy * frames_em_atraso
+    return shifted
+
 class kalman_filter:
     """Classe auxiliar para encapsular o filtro de Kalman"""
     
@@ -138,7 +146,8 @@ class kalman_filter:
             if self.tracks[track_id]["frames_lost"] > self.lost_after_frames:
                 self._drop_track(track_id)
 
-    def step(self, timestamp, measurement_boxes, assign_fn, classes=None, confidences=None):
+    def step(self, timestamp, measurement_boxes, assign_fn, classes=None, confidences=None,
+             flow_by_id=None, frames_em_atraso=0.0):
         """Predict em todo frame. Correct só quando measurement_boxes não é None."""
         self._predict_active(timestamp)
         matched_ids = set()
@@ -150,12 +159,18 @@ class kalman_filter:
                 }
                 for track_id, track in self.tracks.items()
             }
-            ids = assign_fn(measurement_boxes, tracked_objects, (0, 0), None, None)
+            ids = assign_fn(
+                measurement_boxes, tracked_objects, (0, 0), None, None,
+                flow_by_id, frames_em_atraso,
+            )
             for index, (box, track_id) in enumerate(zip(measurement_boxes, ids)):
                 if track_id not in self.tracks:
                     self._spawn_track(track_id, box, timestamp)
                 else:
-                    self._correct_track(track_id, box)
+                    dx, dy = (flow_by_id or {}).get(track_id, (0.0, 0.0))
+                    self._correct_track(
+                        track_id, _advance_box(box, dx, dy, frames_em_atraso),
+                    )
                 classe = classes[index] if classes is not None and index < len(classes) else None
                 confianca = confidences[index] if confidences is not None and index < len(confidences) else None
                 self._set_detection(track_id, classe, confianca)
@@ -414,7 +429,8 @@ class YOLODetector:
         self.next_track_id += count
         return ids
 
-    def _assign_track_ids(self, boxes, tracked_objects, box_offset, frame, last_frame):
+    def _assign_track_ids(self, boxes, tracked_objects, box_offset, frame, last_frame,
+                          flow_by_id=None, frames_em_atraso=0.0):
         """Associa detecções atuais às caixas anteriores usando IoU e centro."""
         offset_x, offset_y = box_offset
         previous = []
@@ -430,24 +446,26 @@ class YOLODetector:
         # text = ""
         for detection_index, box in enumerate(boxes):
             current = np.asarray(box, dtype=np.float32)
-            current_center = np.array(
-                [(current[0] + current[2]) / 2, (current[1] + current[3]) / 2]
-            )
             current_diagonal = max(
                 1.0, float(np.hypot(current[2] - current[0], current[3] - current[1]))
             )
-            for previous_index, (_, old_box, frames_lost) in enumerate(previous):
+            for previous_index, (track_id, old_box, frames_lost) in enumerate(previous):
                 if previous_index not in unmatched:
                     continue
+                dx, dy = (flow_by_id or {}).get(track_id, (0.0, 0.0))
+                advanced = _advance_box(current, dx, dy, frames_em_atraso)
+                advanced_center = np.array(
+                    [(advanced[0] + advanced[2]) / 2, (advanced[1] + advanced[3]) / 2]
+                )
                 old_center = np.array(
                     [(old_box[0] + old_box[2]) / 2, (old_box[1] + old_box[3]) / 2]
                 )
-                distance = float(np.linalg.norm(current_center - old_center))
+                distance = float(np.linalg.norm(advanced_center - old_center))
                 diagonal = max(
                     current_diagonal,
                     float(np.hypot(old_box[2] - old_box[0], old_box[3] - old_box[1])),
                 )
-                iou = self._box_iou(current, old_box)
+                iou = self._box_iou(advanced, old_box)
                 max_distance = max(30.0, diagonal * (1.25 + 0.125 * frames_lost))
                 # text += (f"\n    Detection {detection_index} vs Previous {previous_index}: IoU={iou:.3f}, Distance={distance:.2f}, MaxDistance={max_distance:.2f}, lost={frames_lost}")
                 if iou >= 0.05 or distance <= max_distance:
