@@ -48,16 +48,26 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def gst_bgr_pipeline(uri, width=None, height=None, latency=None):
-    """Jetson GStreamer pipeline: HW decode, optional nvvidconv scale, BGR appsink."""
+def gst_bgr_pipeline(uri, width=None, height=None, latency=None, realtime=True):
+    """Jetson GStreamer pipeline: HW decode, optional nvvidconv scale, BGR appsink.
+
+    realtime=True (RTSP) drops late buffers. realtime=False (file) blocks the
+    decoder so every frame is delivered.
+    """
     latency_attr = f" latency={latency}" if latency is not None else ""
     size = f",width={width},height={height}" if width and height else ""
+    if realtime:
+        queue = "queue max-size-buffers=1 leaky=downstream ! "
+        sink = "appsink sync=false max-buffers=1 drop=true"
+    else:
+        queue = "queue max-size-buffers=3 ! "
+        sink = "appsink sync=false max-buffers=2 drop=false"
     return (
         f"uridecodebin uri={uri}{latency_attr} ! "
-        "queue max-size-buffers=1 leaky=downstream ! "
+        f"{queue}"
         f"nvvidconv ! video/x-raw{size},format=BGRx ! "
         "videoconvert ! video/x-raw,format=BGR ! "
-        "appsink sync=false max-buffers=1 drop=true"
+        f"{sink}"
     )
 
 
@@ -90,7 +100,10 @@ def setup_video_capture_path(path, out_width=None, out_height=None, hw_decode=Tr
 
     probe.release()
     uri = "file://" + os.path.abspath(path)
-    cap = cv2.VideoCapture(gst_bgr_pipeline(uri, out_width, out_height), cv2.CAP_GSTREAMER)
+    cap = cv2.VideoCapture(
+        gst_bgr_pipeline(uri, out_width, out_height, realtime=False),
+        cv2.CAP_GSTREAMER,
+    )
     if not cap.isOpened():
         print("GStreamer HW decode failed; falling back to OpenCV software decode")
         cap = cv2.VideoCapture(path)
