@@ -14,7 +14,29 @@ import tensorrt as trt
 
 INPUT_SIZE = 384
 
+# Fraction of frame height kept for depth. 
+NOSE_TOP = 0.70
+
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+
+
+def nose_cut_row(height, nose_top=NOSE_TOP):
+    """Row where the fuselage crop starts. 0 when the cut is unused."""
+    y_cut = int(height * nose_top)
+    if y_cut <= 0 or y_cut >= height:
+        return 0
+    return y_cut
+
+
+def scene_above_nose(frame_bgr, nose_top=NOSE_TOP):
+    """Crop the fuselage the way depth_test.py does, before the square resize.
+
+    A view of the rows above the cut. The shared frame is not written.
+    """
+    y_cut = nose_cut_row(frame_bgr.shape[0], nose_top)
+    if y_cut == 0:
+        return frame_bgr
+    return frame_bgr[:y_cut]
 
 
 class TRTEngine:
@@ -75,8 +97,12 @@ def build_colormap_lut(colormap=cv2.COLORMAP_INFERNO):
     return np.ascontiguousarray(lut)
 
 
-def postprocess(depth, original_shape, lut):
-    """Colorize depth with a precomputed LUT and upsample to original HxW."""
+def postprocess(depth, original_shape, lut, nose_top=NOSE_TOP):
+    """Colorize depth and place it on the scene above the nose.
+
+    The model never saw the nose, so that band stays black. The scene part
+    lines up with the original frame.
+    """
     depth = np.squeeze(depth).astype(np.float32)
 
     depth_min = depth.min()
@@ -89,9 +115,15 @@ def postprocess(depth, original_shape, lut):
     idx = (depth_norm * 255).astype(np.uint8)
     depth_color = lut[idx]
     out_w, out_h = original_shape[1], original_shape[0]
-    if depth_color.shape[1] != out_w or depth_color.shape[0] != out_h:
-        depth_color = cv2.resize(depth_color, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-    return depth_color
+    y_cut = nose_cut_row(out_h, nose_top)
+    if y_cut == 0:
+        if depth_color.shape[1] != out_w or depth_color.shape[0] != out_h:
+            depth_color = cv2.resize(depth_color, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+        return depth_color
+    scene = cv2.resize(depth_color, (out_w, y_cut), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    canvas[:y_cut] = scene
+    return canvas
 
 
 def extract_roi_depth(depth_output, roi_bbox, model_size, frame_width, frame_height):
@@ -103,12 +135,15 @@ def extract_roi_depth(depth_output, roi_bbox, model_size, frame_width, frame_hei
         depth = depth[0, 0]
     elif depth.ndim == 3:
         depth = depth[0]
+    y_cut = nose_cut_row(frame_height)
+    if y_cut == 0:
+        y_cut = frame_height
     sx = model_size / float(frame_width)
-    sy = model_size / float(frame_height)
+    sy = model_size / float(y_cut)
     x1 = int(np.floor(float(roi_bbox[0]) * sx))
     y1 = int(np.floor(float(roi_bbox[1]) * sy))
     x2 = int(np.ceil(float(roi_bbox[2]) * sx))
-    y2 = int(np.ceil(float(roi_bbox[3]) * sy))
+    y2 = int(np.ceil(min(float(roi_bbox[3]), y_cut) * sy))
     x1 = max(0, min(model_size, x1))
     y1 = max(0, min(model_size, y1))
     x2 = max(0, min(model_size, x2))
@@ -166,7 +201,8 @@ class ZipDepth:
         """
         self.cfx.push()
         try:
-            inp = preprocess(frame, input_size=self.input_size, dtype=self.engine.input_dtype)
+            frame_for_depth = scene_above_nose(frame)
+            inp = preprocess(frame_for_depth, input_size=self.input_size, dtype=self.engine.input_dtype)
             t0 = time.time()
             depth_output = self.engine.infer(inp)
             self._times_infer.append(time.time() - t0)
