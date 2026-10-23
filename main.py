@@ -20,6 +20,8 @@ import threading
 import time
 import cv2
 import numpy as np
+import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from modules.YOLO.yolo_module import YOLODetector, kalman_filter
 from modules.depth.zip_depth_module import ZipDepth, extract_roi_depth
@@ -44,6 +46,7 @@ def parse_arguments():
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
     parser.add_argument("--visual-depth", action="store_true", help="Colorize depth and write the side-by-side debug video")
     parser.add_argument("--verbose", action="store_true", help="Print per-frame JSON and latency breakdowns")
+    parser.add_argument("--log", action="store_true", help="Path to log file (default: logs/processamento_timestamp.jsonl)")
 
     return parser.parse_args()
 
@@ -443,6 +446,46 @@ def boxes_roi(boxes, min_size, max_width, max_height):
         max_height,
     )
 
+def log_path(caminho="logs"):
+    """Create the logs  directitory with parents if it does not exist"""
+    Path(caminho).mkdir(parents=True, exist_ok=True)
+    file_name = f"processamento_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    return f"{caminho}/{file_name}"
+
+def criar_logger(caminho="logs/processamento.jsonl"):
+    Path(caminho).parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("deteccao")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if not logger.handlers:
+        handler = logging.FileHandler(
+            caminho,
+            mode="a",
+            encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+    return logger
+
+def registrar_frame(logger, frame, timestamp, tracks, aproximacoes=None):
+    registro = {
+        "frame": int(frame),
+        "timestamp": float(timestamp),
+        "tracks": tracks,
+        "aproximacoes": aproximacoes if aproximacoes is not None else []
+    }
+
+    if tracks != []:
+        logger.info(json.dumps(
+            registro,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":")
+        ))
+
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
@@ -688,6 +731,10 @@ def main():
     yolo_thread.start()
     flow_thread = threading.Thread(target=flow_worker, name="flow", daemon=True)
     flow_thread.start()
+
+    if args.log:
+        log_file = log_path("logs")
+        logger = criar_logger(log_file)
     
     try:
         while True:
@@ -865,7 +912,15 @@ def main():
                     yolo_fps=(latest_det.completed() / elapsed) if elapsed > 0 else 0.0,
                     detection_ages=detection_ages,
                 )
-        
+
+            if args.log:
+                registrar_frame(
+                    logger=logger,
+                    frame=frame_count,
+                    timestamp=frame_ts,
+                    tracks=log_tracks,
+                    aproximacoes=[]
+                )
             
             # Atualizar progresso
             # if frame_count % 30 == 0:
