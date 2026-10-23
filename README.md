@@ -107,4 +107,58 @@ python main.py --video-ip 192.168.144.25 --clusters 3 --confidence 0.7 --output 
 
 Sem `--visual-depth`, a janela mostra YOLO e fluxo óptico no mesmo frame. Com `--visual-depth`, o vídeo fica lado a lado: à esquerda YOLO e fluxo óptico, à direita o ZipDepth colorido.
 
+### Saída JSON para integração
+
+Quando a opção `--verbose` está habilitada, o sistema imprime um JSON por frame. O
+mesmo registro também é gravado no arquivo de log configurado quando `--log-path` está habilitado:
+
+```json
+{
+  "frame": 2301,
+  "timestamp": 1792586184.0115013,
+  "tracks": [
+    {
+      "track_id": 53,
+      "classe": "drone",
+      "confianca": 0.8344,
+      "cx": 0.6567,
+      "cy": 0.2835,
+      "vx": -5.1081,
+      "vy": -63.2217,
+      "S": 0.0,
+      "deltaS": 0.000965,
+      "timestamp": 1792586184.0115013
+    }
+  ],
+  "aproximacoes": [
+    {
+      "track_id": 53,
+      "indice": 1
+    }
+  ]
+}
+```
+
+Formato esperado dos campos:
+
+| Campo | Tipo/formato | Descrição |
+| --- | --- | --- |
+| `frame` | inteiro (`int`) | Número sequencial do frame processado. |
+| `timestamp` | número real (`float`) | Instante do frame em segundos desde o Unix epoch (UTC). |
+| `tracks` | array de objetos | Lista das detecções/rastreamentos ativos no frame. Pode ser `[]`. |
+| `track_id` | inteiro (`int`) | Identificador estável do objeto enquanto ele permanecer rastreado. |
+| `classe` | texto (`string`) ou `null` | Classe detectada, por exemplo `"drone"`. Pode ser `null` antes da classificação ser associada ao rastreamento. |
+| `confianca` | número real (`float`) ou `null` | Confiança da detecção, normalmente entre `0.0` e `1.0`. |
+| `cx`, `cy` | número real (`float`) | Centro do objeto em pixels no frame redimensionado que é processado pelo sistema; `cx` cresce da esquerda para a direita e `cy` de cima para baixo. |
+| `vx`, `vy` | número real (`float`) | Velocidade estimada do centro em pixels por segundo. Valores negativos indicam movimento para a esquerda ou para cima, respectivamente. |
+| `S` | número real (`float`) ou `null` | Valor de profundidade bruto do ZipDepth na região do objeto, sem normalização adicional. A unidade depende do modelo de profundidade. |
+| `deltaS` | número real (`float`) ou `null` | Variação de `S` entre as janelas histórica mais antiga e mais recente. Fica `null` enquanto não houver histórico suficiente. |
+| `aproximacoes` | array de objetos | Lista de aproximações identificadas no frame. Pode ser `[]`. |
+| `indice` | inteiro (`int`) | Índice ou classificação da aproximação definida pelo módulo responsável. |
+
+Os dois campos `timestamp` (no nível raiz e dentro de cada item de `tracks`)
+representam o mesmo instante do frame. Sistemas consumidores devem aceitar tanto
+`tracks: []` quanto `aproximacoes: []`, pois um frame pode não conter objetos
+rastreados ou aproximações.
+
 ## Módulos Individuais
