@@ -21,6 +21,7 @@ import time
 import logging
 import cv2
 import numpy as np
+import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from modules.YOLO.yolo_module import YOLODetector, kalman_filter
