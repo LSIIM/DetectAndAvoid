@@ -17,6 +17,7 @@ class CollisionAvoidanceAnalyzer:
         self.smoothedExpansions = {}
         self.smoothedVectors = {}     # Suaviza a seta para não girar com ruído
         self.dangerStreaks = {}
+        self.lastAreas = {}
         
         # Limiares de ajuste
         self.expansionThreshold = 0.015  # Crescimento mínimo da área da caixa (1.5% por frame)
@@ -147,6 +148,73 @@ class CollisionAvoidanceAnalyzer:
         isAligned = alignment >= self.directionThreshold
         return isAligned, alignment, droneCenter, smoothVec, f"{alignment:.2f}"
 
+    def analyze(self, tracking_data, tracks, frame_size):
+        """Decide aproximação a partir dos tracks do Kalman e do fluxo por ponto.
+
+        A expansão da área só entra quando status == "updated". Em "predicted"
+        a taxa suavizada e o streak ficam como estavam. A direção do fluxo
+        é avaliada em todo frame. Tracks que o Kalman removeu saem do estado.
+        """
+        width, height = frame_size
+        camera_center = np.array([width / 2.0, height / 2.0])
+        active_ids = set(tracks.keys())
+        for track_id in list(self.smoothedExpansions):
+            if track_id not in active_ids:
+                self.smoothedExpansions.pop(track_id, None)
+                self.smoothedVectors.pop(track_id, None)
+                self.dangerStreaks.pop(track_id, None)
+                self.lastAreas.pop(track_id, None)
+
+        by_id = {}
+        for track_id, track in tracks.items():
+            box = track["box"]
+            self._ensure_track(track_id, box)
+            status = track.get("status", "updated")
+            if status == "updated":
+                is_expanding, _exp_rate = self._update_expansion(track_id, box)
+            else:
+                is_expanding = self.smoothedExpansions[track_id] > self.expansionThreshold
+
+            is_aligned, _alignment, _flow_center, _smooth_vec, _dir_status = self._checkFlowDirection(
+                track_id, box, tracking_data, camera_center
+            )
+
+            if status == "updated":
+                if is_expanding and is_aligned:
+                    self.dangerStreaks[track_id] += 1
+                else:
+                    self.dangerStreaks[track_id] = max(0, self.dangerStreaks[track_id] - 1)
+                if self.dangerStreaks[track_id] >= 3:
+                    self.alertCounter = 15
+                    self.dangerStreaks[track_id] = 0
+
+            by_id[track_id] = {"perigo": bool(is_expanding and is_aligned)}
+
+        alert = self.alertCounter > 0
+        if self.alertCounter > 0:
+            self.alertCounter -= 1
+        return {"alert": alert, "by_id": by_id}
+
+    def _ensure_track(self, track_id, box):
+        if track_id in self.smoothedExpansions:
+            return
+        x1, y1, x2, y2 = [float(v) for v in box]
+        self.smoothedExpansions[track_id] = 0.0
+        self.smoothedVectors[track_id] = np.zeros(2, dtype=np.float32)
+        self.dangerStreaks[track_id] = 0
+        self.lastAreas[track_id] = float(max(1.0, (x2 - x1) * (y2 - y1)))
+
+    def _update_expansion(self, track_id, box):
+        """Expansão suavizada contra a última área medida, não contra a caixa prevista."""
+        x1, y1, x2, y2 = [float(v) for v in box]
+        curr_area = float(max(1.0, (x2 - x1) * (y2 - y1)))
+        prev_area = self.lastAreas.get(track_id, curr_area)
+        raw_expansion = (curr_area - prev_area) / (prev_area + 1e-6)
+        self.smoothedExpansions[track_id] = (self.smoothedExpansions[track_id] * 0.65) + (raw_expansion * 0.35)
+        self.lastAreas[track_id] = curr_area
+        is_expanding = self.smoothedExpansions[track_id] > self.expansionThreshold
+        return is_expanding, self.smoothedExpansions[track_id]
+
     def analyzeAndDraw(self, frame, trackingData, boxes=None):
         """Cruza a expansão da Bounding Box com a direção do Optical Flow e desenha o HUD"""
         resultFrame = frame.copy()
@@ -229,4 +297,5 @@ class CollisionAvoidanceAnalyzer:
         self.smoothedExpansions.clear()
         self.smoothedVectors.clear()
         self.dangerStreaks.clear()
+        self.lastAreas.clear()
         self.alertCounter = 0

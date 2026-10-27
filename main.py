@@ -18,13 +18,15 @@ import subprocess
 import sys
 import threading
 import time
+import logging
 import cv2
 import numpy as np
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from modules.YOLO.yolo_module import YOLODetector, kalman_filter
+from modules.avoid.avoidDirection import CollisionAvoidanceAnalyzer
 from modules.depth.zip_depth_module import ZipDepth, extract_roi_depth
-# from modules.Optical_Flow import opticalflow as optical_flow
-from modules.Optical_Flow.opticalflow_roi import RoiPointTracker
+from modules.Optical_Flow.opticalflow_roi import PipelineOpticalFlow
 
 YOLO_MODEL_PATH = r"weights/best_yolo26_drone_bird_aircraft_junho_2026.engine"
 ZIPDEPTH_ENGINE_PATH = r"weights/zipdepth_base_384x384_fp16.trt"
@@ -44,6 +46,7 @@ def parse_arguments():
     parser.add_argument("--no-display", action="store_true", help="Skip cv2.imshow (keep --output if set)")
     parser.add_argument("--visual-depth", action="store_true", help="Colorize depth and write the side-by-side debug video")
     parser.add_argument("--verbose", action="store_true", help="Print per-frame JSON and latency breakdowns")
+    parser.add_argument("--log", action="store_true", help="Path to log file (default: logs/processamento_timestamp.jsonl)")
 
     return parser.parse_args()
 
@@ -306,12 +309,19 @@ def _enqueue_latest(record_q, packet):
         pass
 
 
-def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color):
+def _danger_outline(image, track, x1, y1, x2, y2):
+    if not track.get("perigo"):
+        return
+    cv2.rectangle(image, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (0, 0, 255), 2)
+
+
+def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color, alert=False):
     combined = frame_bgr.copy()
     for track in tracks:
         x1, y1, x2, y2 = [int(round(v)) for v in track["box"]]
         color = (0, 255, 0) if track["status"] == "updated" else (0, 165, 255)
         cv2.rectangle(combined, (x1, y1), (x2, y2), color, 2)
+        _danger_outline(combined, track, x1, y1, x2, y2)
         cv2.putText(
             combined, str(track["track_id"]), (x1, max(0, y1 - 6)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
@@ -328,6 +338,11 @@ def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color):
         )
     cv2.putText(combined, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv2.putText(combined, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+    if alert:
+        cv2.putText(
+            combined, "APROXIMACAO DETECTADA", (20, 80),
+            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3,
+        )
     if depth_color is None:
         return combined
     depth_panel = depth_color.copy()
@@ -335,6 +350,7 @@ def _render_record_frame(frame_bgr, tracks, fps, info_text, depth_color):
         x1, y1, x2, y2 = [int(round(v)) for v in track["box"]]
         color = (0, 255, 0) if track["status"] == "updated" else (0, 165, 255)
         cv2.rectangle(depth_panel, (x1, y1), (x2, y2), color, 2)
+        _danger_outline(depth_panel, track, x1, y1, x2, y2)
         cv2.putText(
             depth_panel, str(track["track_id"]), (x1, max(0, y1 - 6)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
@@ -443,6 +459,46 @@ def boxes_roi(boxes, min_size, max_width, max_height):
         max_height,
     )
 
+def log_path(caminho="logs"):
+    """Create the logs  directitory with parents if it does not exist"""
+    Path(caminho).mkdir(parents=True, exist_ok=True)
+    file_name = f"processamento_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    return f"{caminho}/{file_name}"
+
+def criar_logger(caminho="logs/processamento.jsonl"):
+    Path(caminho).parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("deteccao")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if not logger.handlers:
+        handler = logging.FileHandler(
+            caminho,
+            mode="a",
+            encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+    return logger
+
+def registrar_frame(logger, frame, timestamp, tracks, aproximacoes=None):
+    registro = {
+        "frame": int(frame),
+        "timestamp": float(timestamp),
+        "tracks": tracks,
+        "aproximacoes": aproximacoes if aproximacoes is not None else []
+    }
+
+    if tracks != []:
+        logger.info(json.dumps(
+            registro,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":")
+        ))
+
 # ============================= FUNÇÃO PRINCIPAL =============================
 def main():
     """Main integration function"""
@@ -518,6 +574,12 @@ def main():
         # Optical Flow setup
         print("Setting up Optical Flow...")
         flow_context = None
+        flow_fps = fps if fps and fps > 0 else 30.0
+        pipeline_flow = PipelineOpticalFlow(
+            fps=flow_fps,
+            processing_size=(processing_width, processing_height),
+        )
+        collision = CollisionAvoidanceAnalyzer(fps=flow_fps)
         print("Setting up YOLO detector...")
         tracker = kalman_filter()
         yolo_detector = YOLODetector(
@@ -556,14 +618,11 @@ def main():
     record_q = queue.Queue(maxsize=8)
 
     def record_worker():
-        log_file = open("tracks.jsonl", "w", encoding="utf-8")
         try:
             while True:
                 packet = record_q.get()
                 if packet is None:
                     break
-                log_file.write(json.dumps(packet["log"]) + "\n")
-                log_file.flush()
                 frame = packet.get("frame")
                 if writer is None or frame is None:
                     continue
@@ -572,6 +631,7 @@ def main():
                     depth_color = zip_depth.colorize(packet["depth"], frame.shape[:2])
                 display = _render_record_frame(
                     frame, packet["tracks"], fps, packet["info_text"], depth_color,
+                    alert=packet.get("alert", False),
                 )
                 if packet["frame_count"] % 30 == 0:
                     cv2.imwrite(
@@ -580,7 +640,6 @@ def main():
                     )
                 writer.write(display)
         finally:
-            log_file.close()
             if writer:
                 writer.release()
 
@@ -604,7 +663,6 @@ def main():
     detection_ages = []
     last_det_ts = None
     last_flow_by_id = {}
-    prev_gray = None
     prev_depth = {}
     depth_window = 8
     flow_jobs = queue.Queue()
@@ -669,18 +727,17 @@ def main():
             latest_det.publish(boxes, confidences, classes, ids, approach, det_frame_ts)
 
     def flow_worker():
-        roi_flow = RoiPointTracker()
         while True:
             job = flow_jobs.get()
             if job is None:
                 break
-            items, prev, curr, reply = job
+            frame_bgr, items, reply = job
             try:
-                results, elapsed = roi_flow.step(items, prev, curr)
+                results, tracking_data, elapsed = pipeline_flow.step(frame_bgr, items)
             except Exception as e:
                 print(f"Error in Optical Flow processing: {e}")
-                results, elapsed = [], 0.0
-            reply.put((results, elapsed))
+                results, tracking_data, elapsed = [], None, 0.0
+            reply.put((results, tracking_data, elapsed))
 
     capture_thread = threading.Thread(target=capture_worker, name="capture", daemon=True)
     capture_thread.start()
@@ -688,6 +745,10 @@ def main():
     yolo_thread.start()
     flow_thread = threading.Thread(target=flow_worker, name="flow", daemon=True)
     flow_thread.start()
+
+    if args.log:
+        log_file = log_path("logs")
+        logger = criar_logger(log_file)
     
     try:
         while True:
@@ -726,12 +787,11 @@ def main():
                 meas_classes, meas_conf, last_flow_by_id, frames_em_atraso,
             )
             
-            curr_gray = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
             flow_items = [
                 (track_id, track["box"]) for track_id, track in tracker.tracks.items()
             ]
             flow_reply = queue.Queue(maxsize=1)
-            flow_jobs.put((flow_items, prev_gray, curr_gray, flow_reply))
+            flow_jobs.put((resized_frame, flow_items, flow_reply))
 
             # Shared buffer: workers do not write the color frame
             future_depth = executor.submit(process_depth_threaded, resized_frame, zip_depth)
@@ -769,9 +829,13 @@ def main():
                 if track_id not in active_ids:
                     del prev_depth[track_id]
             zip_depth._times_postprocess.append(time.time() - t0)
-            flow_results, flow_dt = flow_reply.get()
+            flow_results, tracking_data, flow_dt = flow_reply.get()
             times_flow_roi.append(flow_dt)
-            prev_gray = curr_gray
+            avoid_state = collision.analyze(
+                tracking_data,
+                tracker.tracks,
+                (resized_frame.shape[1], resized_frame.shape[0]),
+            )
 
             frame_processing_time = time.time() - frame_start_time
             flow_by_id = {
@@ -784,7 +848,8 @@ def main():
             }
             log_tracks = []
             draw_tracks = []
-            for track_id, track in tracker.tracks.items():
+            aproximacoes = []
+            for indice, (track_id, track) in enumerate(tracker.tracks.items(), start=1):
                 kalman = tracker.kalman_filters[track_id]
                 state = kalman.statePost if track["status"] == "updated" else kalman.statePre
                 cx = float(state[0, 0])
@@ -793,6 +858,7 @@ def main():
                 vy = float(state[3, 0])
                 level, delta_s = depth_stats.get(track_id, (None, None))
                 dx, dy = flow_by_id.get(track_id, (0.0, 0.0))
+                perigo = bool(avoid_state["by_id"].get(track_id, {}).get("perigo", False))
                 log_tracks.append({
                     "track_id": int(track_id),
                     "classe": track.get("classe"),
@@ -805,6 +871,11 @@ def main():
                     "deltaS": delta_s,
                     "timestamp": frame_ts,
                 })
+                if perigo:
+                    aproximacoes.append({
+                        "track_id": int(track_id),
+                        "indice": indice,
+                    })
                 draw_tracks.append({
                     "track_id": int(track_id),
                     "box": [float(v) for v in track["box"]],
@@ -813,13 +884,20 @@ def main():
                     "cy": cy,
                     "dx": dx,
                     "dy": dy,
+                    "perigo": perigo,
                 })
             info_text = f"Frame: {frame_count} | YOLO | ZipDepth | Optical Flow | {frame_processing_time*1000:.1f}ms"
             packet = {
-                "log": {"frame": frame_count, "timestamp": frame_ts, "tracks": log_tracks},
+                "log": {
+                    "frame": frame_count,
+                    "timestamp": frame_ts,
+                    "tracks": log_tracks,
+                    "aproximacoes": aproximacoes,
+                },
                 "frame_count": frame_count,
                 "info_text": info_text,
                 "tracks": draw_tracks,
+                "alert": bool(avoid_state["alert"]),
                 "frame": resized_frame.copy() if writer or not args.no_display else None,
                 "depth": depth_output if args.visual_depth else None,
             }
@@ -836,6 +914,7 @@ def main():
                     depth_color = zip_depth.colorize(depth_output, packet["frame"].shape[:2])
                 display = _render_record_frame(
                     packet["frame"], draw_tracks, fps, info_text, depth_color,
+                    alert=packet["alert"],
                 )
                 cv2.imshow("DetectAndAvoid - YOLO | Optical Flow | ZipDepth", display)
                 key = cv2.waitKey(1) & 0xFF
@@ -865,7 +944,15 @@ def main():
                     yolo_fps=(latest_det.completed() / elapsed) if elapsed > 0 else 0.0,
                     detection_ages=detection_ages,
                 )
-        
+
+            if args.log:
+                registrar_frame(
+                    logger=logger,
+                    frame=frame_count,
+                    timestamp=frame_ts,
+                    tracks=log_tracks,
+                    aproximacoes=aproximacoes,
+                )
             
             # Atualizar progresso
             # if frame_count % 30 == 0:
@@ -922,9 +1009,9 @@ def main():
         
         cap.release()
         cv2.destroyAllWindows()
-        
-        # Cleanup modules
-        # optical_flow.cleanup(flow_context)
+
+        pipeline_flow.cleanup()
+        collision.cleanup()
     
     return 0
 
