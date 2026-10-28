@@ -10,61 +10,38 @@ _ROI_LK_PARAMS = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
 )
 
-def flow_on_crops(prev_gray, curr_gray, max_point=30):
-    """Lucas-Kanade entre dois crops do mesmo retângulo. Vetor zero se não houver par válido."""
-    if prev_gray is None or curr_gray is None:
-        return 0.0, 0.0, 0.0, 0.0
-    if prev_gray.shape != curr_gray.shape or prev_gray.size == 0:
-        return 0.0, 0.0, 0.0, 0.0
-    if min(prev_gray.shape[:2]) < 8:
-        return 0.0, 0.0, 0.0, 0.0
-    points = cv2.goodFeaturesToTrack(
-        prev_gray, maxCorners=max_point, **_ROI_FEATURE_PARAMS
-    )
-    if points is None:
-        return 0.0, 0.0, 0.0, 0.0
-    next_points, status, _err = cv2.calcOpticalFlowPyrLK(
-        prev_gray, curr_gray, points, None, **_ROI_LK_PARAMS
-    )
-    if next_points is None or status is None:
-        return 0.0, 0.0, 0.0, 0.0
-    good = (next_points - points).reshape(-1, 2)[status.reshape(-1) == 1]
-    if len(good) == 0:
-        return 0.0, 0.0, 0.0, 0.0
-    dx, dy = good.mean(axis=0)
-    magnitude = float(np.hypot(dx, dy))
-    angle = float(np.degrees(np.arctan2(dy, dx)))
-    return float(dx), float(dy), magnitude, angle
-
-def process_roi_batch(rois, max_point=30):
-    """rois: lista de (track_id, crop_anterior, crop_atual)."""
-    t0 = time.time()
-    results = []
-    for track_id, prev_crop, curr_crop in rois:
-        dx, dy, magnitude, angle = flow_on_crops(prev_crop, curr_crop, max_point)
-        results.append((track_id, dx, dy, magnitude, angle))
-    return results, time.time() - t0
-
 
 class RoiPointTracker:
-    """Pontos de Lucas-Kanade que continuam no mesmo track, como no fluxo antigo."""
+    """Pontos de Lucas-Kanade que continuam no mesmo track, só dentro da caixa."""
 
     def __init__(self, max_point=30):
         self.max_point = max_point
         self._points = {}
 
     def step(self, items, prev_gray, curr_gray):
-        """items: lista de (track_id, box). A seta é a mediana dos pontos que sobreviveram."""
+        """items: lista de (track_id, box). A seta é a mediana dos pontos que sobreviveram.
+
+        Além da lista (track_id, dx, dy, magnitude, angle), devolve os pontos
+        sobreviventes e o deslocamento de cada um, em px/frame, para o avoid.
+        """
         t0 = time.time()
         active = set()
         results = []
+        positions = []
+        displacements = []
         for track_id, box in items:
             active.add(track_id)
-            results.append(self._step_track(track_id, box, prev_gray, curr_gray))
+            track_id, dx, dy, magnitude, angle, survived, disp = self._step_track(
+                track_id, box, prev_gray, curr_gray
+            )
+            results.append((track_id, dx, dy, magnitude, angle))
+            if disp is not None and len(disp) > 0:
+                positions.append(survived)
+                displacements.append(disp)
         for track_id in list(self._points):
             if track_id not in active:
                 del self._points[track_id]
-        return results, time.time() - t0
+        return results, positions, displacements, time.time() - t0
 
     def _step_track(self, track_id, box, prev_gray, curr_gray):
         pts = self._points.get(track_id)
@@ -88,6 +65,8 @@ class RoiPointTracker:
                     good_new = nxt_xy[keep]
                     disp = good_new - old_xy[keep]
 
+        survived = good_new
+        survived_disp = disp
         if disp is not None and len(disp) > 0:
             dx = float(np.median(disp[:, 0]))
             dy = float(np.median(disp[:, 1]))
@@ -106,7 +85,7 @@ class RoiPointTracker:
             self._points[track_id] = good_new.reshape(-1, 1, 2).astype(np.float32)
         elif track_id in self._points:
             del self._points[track_id]
-        return track_id, dx, dy, magnitude, angle
+        return track_id, dx, dy, magnitude, angle, survived, survived_disp
 
     def _inside(self, xy, box, shape):
         height, width = shape[:2]
@@ -139,3 +118,52 @@ class RoiPointTracker:
         corners[:, 0] += x1
         corners[:, 1] += y1
         return corners
+
+    def cleanup(self):
+        self._points.clear()
+
+
+class PipelineOpticalFlow:
+    """Fluxo por caixa. Guarda o cinza anterior e entrega os pontos ao avoid."""
+
+    def __init__(self, fps=30, processing_size=(640, 480), max_point=30):
+        self.fps = max(1.0, float(fps))
+        self.processing_size = processing_size
+        self.tracker = RoiPointTracker(max_point=max_point)
+        self._prev_gray = None
+
+    def step(self, frame, items):
+        """items: lista de (track_id, box) no espaço do frame.
+
+        Retorna (track_id, dx, dy, magnitude, angle) em px/frame, o
+        trackingData com positions e velocities dos pontos que se moveram,
+        e o tempo do passo.
+        """
+        t0 = time.time()
+        if frame is None:
+            return (
+                [(track_id, 0.0, 0.0, 0.0, 0.0) for track_id, _box in items],
+                None,
+                time.time() - t0,
+            )
+
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self._prev_gray is not None and self._prev_gray.shape != curr_gray.shape:
+            self._prev_gray = None
+            self.tracker.cleanup()
+
+        results, positions, displacements, _elapsed = self.tracker.step(
+            items, self._prev_gray, curr_gray
+        )
+        self._prev_gray = curr_gray
+        tracking_data = None
+        if positions:
+            tracking_data = {
+                "positions": np.vstack(positions).astype(np.float32),
+                "velocities": np.vstack(displacements).astype(np.float32) * self.fps,
+            }
+        return results, tracking_data, time.time() - t0
+
+    def cleanup(self):
+        self._prev_gray = None
+        self.tracker.cleanup()
